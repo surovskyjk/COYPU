@@ -651,6 +651,14 @@ class CoypuPlotWidget(pg.GraphicsLayoutWidget):
             return f"{stationKm:.3f} {self.distanceUnitLabel()}"
         return f"{stationKm * 1000.0:.1f} {self.distanceUnitLabel()}"
 
+    # Value of one registered curve at a chainage, NaN outside the range it actually covers
+    def seriesValueAt(self, plotKey, seriesKey, stationKm):
+        entry = self.plotSeries.get(plotKey, {}).get(seriesKey)
+        if entry is None or entry["x"].size < 2:
+            return float("nan")
+        return float(np.interp(stationKm, entry["x"], entry["y"],
+                               left=float("nan"), right=float("nan")))
+
     # Move the readout label to the top of its plot at the current chainage
     def updateReadout(self, value):
         if self.readoutLabel is None or self.readoutPlotKey is None:

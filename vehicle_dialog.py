@@ -13,7 +13,8 @@ import default_values
 import readfile
 from plot_widgets import CoypuPlotWidget
 from ui_kit import CollapsibleSection, MetricCard
-from vehicle_catalog import CatalogVehicle, MAX_VEHICLES, VehicleCatalog, toFloat, DEFAULT_ROT_MASS_FACTOR
+from vehicle_catalog import (CatalogVehicle, DEFAULT_MAX_CANT_DEFICIENCY_MM,
+                             DEFAULT_ROT_MASS_FACTOR, MAX_VEHICLES, VehicleCatalog, toFloat)
 
 
 # Small pyqtgraph canvas rendering the tractive effort against speed curve
@@ -213,27 +214,30 @@ class VehicleTab(QWidget):
         self.inputMass = QLineEdit(str(initialMass))
         self.inputLength = QLineEdit(str(initialLength))
         self.inputBrakeDecel = QLineEdit(str(self.vehicleData.get(
-            "trainBrakeDecel", default_values.defVal.get("trainBrakeDecel", 1.0))))
+            "trainBrakeDecel", default_values.defVal.get("trainBrakeDecel", 0.45))))
         self.inputInitialSpeed = QLineEdit(str(self.vehicleData.get("trainInitialSpeed", 0.0)))
         self.inputFinalSpeed = QLineEdit(str(self.vehicleData.get("trainFinalSpeed", 0.0)))
 
+        # The shared profile switcher owns the tier now, only the two per vehicle overrides remain here
         self.comboProfile = QComboBox()
         self.profiles = [
-            (lan.get("speed_lim_ttp", "TTP Speed Limits"), ["stationSpeedLimits", "speedLimits"]),
-            (lan.get("speed_lim_100", "V100"), ["stationSpeed100", "speedLimits100"]),
-            (lan.get("speed_lim_130", "V130"), ["stationSpeed130", "speedLimits130"]),
-            (lan.get("speed_lim_150", "V150"), ["stationSpeed150", "speedLimits150"]),
-            (lan.get("speed_lim_K", "VK"), ["stationSpeedK", "speedLimitsK"]),
+            (lan.get("speedProfileShared", "Follow active speed profile"), None),
             (lan.get("speed_lim_manual", "Manual Speed Limits"), ["manualSpeedLimits", "manualSpeedLimits"]),
             (lan.get("unlimited", "Unlimited"), ["unlimited", "unlimited"])
         ]
         for text, data in self.profiles:
             self.comboProfile.addItem(text, data)
-        currentProfile = self.vehicleData.get("speedLimitPlot", ["stationSpeed150", "speedLimits150"])
+        currentProfile = self.vehicleData.get("speedLimitPlot")
         for index, (text, data) in enumerate(self.profiles):
-            if data == currentProfile:
+            if data is not None and data == currentProfile:
                 self.comboProfile.setCurrentIndex(index)
                 break
+
+        self.inputMaxCantDeficiency = QLineEdit(
+            str(self.vehicleData.get("maxCantDeficiencyMm", DEFAULT_MAX_CANT_DEFICIENCY_MM)))
+        self.inputMaxCantDeficiency.setToolTip(lan.get(
+            "vehicleMaxCantDeficiencyTip",
+            "Highest cant deficiency this vehicle is certified for, gating the design speed profiles"))
 
         self.checkReverse = QCheckBox(lan.get("runAgainstStationing", "Run against stationing"))
         self.checkReverse.setChecked(self.vehicleData.get("runReversed", False))
@@ -258,9 +262,12 @@ class VehicleTab(QWidget):
         gridLayout.addWidget(QLabel(lan.get("trainFinalSpeed", "Final Speed [km/h]:")), 3, 2)
         gridLayout.addWidget(self.inputFinalSpeed, 3, 3)
 
-        gridLayout.addWidget(QLabel(lan.get("speed_profile", "Speed Profile:")), 4, 0)
-        gridLayout.addWidget(self.comboProfile, 4, 1)
+        gridLayout.addWidget(QLabel(lan.get("vehicleMaxCantDeficiency", "Max cant deficiency I [mm]:")), 4, 0)
+        gridLayout.addWidget(self.inputMaxCantDeficiency, 4, 1)
         gridLayout.addWidget(self.checkReverse, 4, 2, 1, 2)
+
+        gridLayout.addWidget(QLabel(lan.get("speed_profile", "Speed Profile:")), 5, 0)
+        gridLayout.addWidget(self.comboProfile, 5, 1)
 
         outerLayout.addLayout(gridLayout)
 
@@ -382,6 +389,7 @@ class VehicleTab(QWidget):
         self.inputBrakeDecel.setText(f"{catalogVehicle.brakeDecelMs2:g}")
         self.inputMass.setText(f"{catalogVehicle.massTonnes:g}")
         self.inputLength.setText(f"{catalogVehicle.lengthM:g}")
+        self.inputMaxCantDeficiency.setText(f"{catalogVehicle.maxCantDeficiencyMm:g}")
 
         self.populateTable(self.tableRes, settings["trainRes"])
         self.populateTable(self.tableTrac, settings["trainTrac"])
@@ -437,9 +445,18 @@ class VehicleTab(QWidget):
             "trainRes": [],
             "trainTrac": [],
             "trainParam": [],
-            "speedLimitPlot": self.comboProfile.currentData(),
             "runReversed": self.checkReverse.isChecked()
         }
+
+        # A None entry means this vehicle follows the shared tier, so it carries no pinned profile
+        overrideProfile = self.comboProfile.currentData()
+        if overrideProfile is not None:
+            settingsData["speedLimitPlot"] = list(overrideProfile)
+
+        try:
+            settingsData["maxCantDeficiencyMm"] = float(self.inputMaxCantDeficiency.text())
+        except ValueError:
+            settingsData["maxCantDeficiencyMm"] = DEFAULT_MAX_CANT_DEFICIENCY_MM
 
         try:
             settingsData["trainMaxSpeed"] = float(self.inputMaxSpeed.text())
@@ -535,11 +552,12 @@ class VehicleSettingsDialog(QDialog):
                 "trainFinalSpeed": self.settingsData.get("trainFinalSpeed", 0.0),
                 "trainMaxSpeed": self.settingsData.get("trainMaxSpeed", self.settingsData.get("vInit", [120])[0]),
                 "trainBrakeDecel": self.settingsData.get("trainBrakeDecel",
-                                                          default_values.defVal.get("trainBrakeDecel", 1.0)),
+                                                          default_values.defVal.get("trainBrakeDecel", 0.45)),
                 "trainRes": self.settingsData.get("trainRes", default_values.defVal.get("trainRes", [])),
                 "trainTrac": self.settingsData.get("trainTrac", default_values.defVal.get("trainTrac", [])),
                 "trainParam": self.settingsData.get("trainParam", default_values.defVal.get("trainParam", [])),
-                "speedLimitPlot": self.settingsData.get("speedLimitPlot", ["stationSpeed150", "speedLimits150"]),
+                "maxCantDeficiencyMm": self.settingsData.get("maxCantDeficiencyMm",
+                                                              DEFAULT_MAX_CANT_DEFICIENCY_MM),
                 "runReversed": self.settingsData.get("runReversed", False)
             }
             vehicles.append(oldV)

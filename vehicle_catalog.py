@@ -30,11 +30,15 @@ META_LENGTH = "lengthM"
 META_BRAKE_DECEL = "brakeDecelMs2"
 META_MAX_TRACTIVE_FORCE = "maxTractiveForceKN"
 META_ROT_MASS = "rotMassFactor"
+META_MAX_CANT_DEFICIENCY = "maxCantDeficiencyMm"
 
 # Fallbacks applied when a legacy CSV carries no Meta block
 DEFAULT_ROT_MASS_FACTOR = 1.08
-DEFAULT_BRAKE_DECEL = 1.0
+DEFAULT_BRAKE_DECEL = 0.45
 DEFAULT_MAX_SPEED = 120.0
+
+# Certified cant deficiency assumed for a vehicle whose catalog file states none
+DEFAULT_MAX_CANT_DEFICIENCY_MM = 150.0
 
 # Sampling step of the rendered tractive effort curve
 CURVE_SAMPLE_STEP_KMH = 0.5
@@ -63,6 +67,7 @@ class CatalogVehicle:
         self.brakeDecelMs2 = DEFAULT_BRAKE_DECEL
         self.rotMassFactor = DEFAULT_ROT_MASS_FACTOR
         self.maxTractiveForceKN = None
+        self.maxCantDeficiencyMm = DEFAULT_MAX_CANT_DEFICIENCY_MM
 
         self.resCoefficients = [0.0, 0.0, 0.0]
         self.tracBands = []
@@ -112,6 +117,7 @@ class CatalogVehicle:
 
         settings["trainMaxSpeed"] = float(self.maxSpeedKmh)
         settings["trainBrakeDecel"] = float(self.brakeDecelMs2)
+        settings["maxCantDeficiencyMm"] = float(self.maxCantDeficiencyMm)
         settings["trainParam"] = [[self.vehicleName, float(self.rotMassFactor),
                                    float(self.massTonnes), float(self.lengthM)]]
         settings["trainRes"] = [[self.vehicleName] + [float(value) for value in self.resCoefficients]]
@@ -239,6 +245,9 @@ class VehicleCatalog:
                                                    DEFAULT_BRAKE_DECEL)
         if META_MAX_TRACTIVE_FORCE in metaValues:
             catalogVehicle.maxTractiveForceKN = toFloat(metaValues[META_MAX_TRACTIVE_FORCE], None)
+        if META_MAX_CANT_DEFICIENCY in metaValues:
+            catalogVehicle.maxCantDeficiencyMm = toFloat(metaValues[META_MAX_CANT_DEFICIENCY],
+                                                         DEFAULT_MAX_CANT_DEFICIENCY_MM)
 
         # Legacy files state no top speed, the last traction band is the best guess
         if META_MAX_SPEED in metaValues:
@@ -288,6 +297,9 @@ class VehicleCatalog:
                          toFloat(vehicleSettings.get("trainBrakeDecel"), DEFAULT_BRAKE_DECEL)])
         writer.writerow([SECTION_META.capitalize(), META_MAX_TRACTIVE_FORCE, round(peakForce, 4)])
         writer.writerow([SECTION_META.capitalize(), META_ROT_MASS, rotMassFactor])
+        writer.writerow([SECTION_META.capitalize(), META_MAX_CANT_DEFICIENCY,
+                         toFloat(vehicleSettings.get("maxCantDeficiencyMm"),
+                                 DEFAULT_MAX_CANT_DEFICIENCY_MM)])
 
         writer.writerow([SECTION_PARAM.capitalize(), resolvedName, rotMassFactor, massTonnes, lengthM])
 

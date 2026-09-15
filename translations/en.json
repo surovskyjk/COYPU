@@ -742,5 +742,21 @@
   "batchScenarioRMax": "R_max [m]",
   "batchScenarioRatioC": "Ratio C [%]",
   "batchProblemInvalidOptimizationRMax": "R_max must be between 100 and 99000 m",
-  "batchProblemInvalidOptimizationRatio": "The slew allocation ratio must be between 0 and 100 %"
+  "batchProblemInvalidOptimizationRatio": "The slew allocation ratio must be between 0 and 100 %",
+  "groupProfile": "Speed profile",
+  "profileSelectorLabel": "Speed profile",
+  "profileSelectorTip": "Design speed profile driving the simulation, the plots and the statistics",
+  "profileBlockedNoData": "This profile has no calculated speed limits yet",
+  "profileBlockedCantDeficiency": "Profile {profile} unavailable: active vehicle certified up to I = {limit} mm",
+  "profileNotCertified": "Vehicle is not certified for the active speed profile",
+  "speedProfileShared": "Follow active speed profile",
+  "vehicleMaxCantDeficiency": "Max cant deficiency I [mm]:",
+  "vehicleMaxCantDeficiencyTip": "Highest cant deficiency this vehicle is certified for, gating the design speed profiles",
+  "simulationFailed": "Simulation failed",
+  "simulationNoTrackData": "No alignment or speed profile data to simulate against",
+  "statusSimulationNoProfile": "No speed profile is available to simulate",
+  "statusSimulationNoResults": "Simulation produced no results",
+  "statusSimulationProfiles": "Simulating profile {index} of {count}",
+  "readoutProfileShort": "Vlim",
+  "readoutSpeedShort": "V"
 }

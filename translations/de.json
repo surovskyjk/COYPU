@@ -742,5 +742,21 @@
   "batchScenarioRMax": "R_max [m]",
   "batchScenarioRatioC": "Verhältnis C [%]",
   "batchProblemInvalidOptimizationRMax": "R_max muss zwischen 100 und 99000 m liegen",
-  "batchProblemInvalidOptimizationRatio": "Das Aufteilungsverhältnis muss zwischen 0 und 100 % liegen"
+  "batchProblemInvalidOptimizationRatio": "Das Aufteilungsverhältnis muss zwischen 0 und 100 % liegen",
+  "groupProfile": "Geschwindigkeitsprofil",
+  "profileSelectorLabel": "Geschwindigkeitsprofil",
+  "profileSelectorTip": "Entwurfsgeschwindigkeitsprofil für Simulation, Diagramme und Statistik",
+  "profileBlockedNoData": "Für dieses Profil wurden noch keine Geschwindigkeiten berechnet",
+  "profileBlockedCantDeficiency": "Profil {profile} nicht verfügbar: aktives Fahrzeug ist bis I = {limit} mm zugelassen",
+  "profileNotCertified": "Fahrzeug ist für das aktive Geschwindigkeitsprofil nicht zugelassen",
+  "speedProfileShared": "Aktivem Geschwindigkeitsprofil folgen",
+  "vehicleMaxCantDeficiency": "Max. Überhöhungsfehlbetrag I [mm]:",
+  "vehicleMaxCantDeficiencyTip": "Höchster Überhöhungsfehlbetrag, für den das Fahrzeug zugelassen ist, begrenzt die Entwurfsprofile",
+  "simulationFailed": "Simulation fehlgeschlagen",
+  "simulationNoTrackData": "Keine Trassierungs- oder Geschwindigkeitsdaten für die Simulation vorhanden",
+  "statusSimulationNoProfile": "Kein Geschwindigkeitsprofil zur Simulation verfügbar",
+  "statusSimulationNoResults": "Die Simulation lieferte keine Ergebnisse",
+  "statusSimulationProfiles": "Simuliere Profil {index} von {count}",
+  "readoutProfileShort": "Vlim",
+  "readoutSpeedShort": "V"
 }

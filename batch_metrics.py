@@ -4,6 +4,12 @@ import numpy as np
 # Placeholder used when no explicit no-data text is supplied
 NO_DATA_PLACEHOLDER = "--:--"
 
+# Chainage window a stop may miss the nearest simulated sample by, matching the vehicle report lookup
+STOP_MATCH_TOLERANCE_M = 2.0
+
+# Chainages the last simulation actually ran against, already projected onto the active alignment
+SIMULATED_STOPS_KEY = "simulatedTrainStops"
+
 
 # Guard used before touching any optional array
 def hasData(values):
@@ -21,7 +27,11 @@ def formatDuration(seconds, noDataText=NO_DATA_PLACEHOLDER):
 # Scheduled stops in the order they were imported, never sorted by chainage
 def stopsList(dataStorage):
     stops = []
-    for stop in (dataStorage.get("settingsData", {}) or {}).get("trainStops", []):
+    # The simulated list wins because travel times must be read on the stationing the engine used
+    sourceStops = dataStorage.get(SIMULATED_STOPS_KEY)
+    if not sourceStops:
+        sourceStops = (dataStorage.get("settingsData", {}) or {}).get("trainStops", [])
+    for stop in sourceStops:
         try:
             stationKm = float(stop[0])
             dwell = float(stop[1])
@@ -41,12 +51,15 @@ def computeTrackLengthKm(dataStorage):
     return float(np.max(stationHorizontal) - np.min(stationHorizontal))
 
 
-# Cumulative time at the chainage nearest to a stop, mirrors generateVehicleReport's lookup
-def lookupTimeAtStation(stationsM, timesS, stationKm):
+# Cumulative time at the chainage nearest to a stop, None when the stop lies outside the simulated range
+def lookupTimeAtStation(stationsM, timesS, stationKm, toleranceM=STOP_MATCH_TOLERANCE_M):
     if not hasData(stationsM) or not hasData(timesS):
         return None
     stationsM = np.asarray(stationsM, dtype=float)
     index = int(np.argmin(np.abs(stationsM - stationKm * 1000.0)))
+    # Without this an out of range stop would snap to an endpoint and fake a zero length section
+    if abs(float(stationsM[index]) - stationKm * 1000.0) > toleranceM:
+        return None
     return float(timesS[index])
 
 
@@ -79,10 +92,10 @@ def computeTravelTimeSections(dataStorage, vehicleIndex):
             kmB, dwellB, nameB = stops[legIndex + 1]
             _, depA = stopTiming(stationsM, timesS, kmA, dwellA)
             arrB, _ = stopTiming(stationsM, timesS, kmB, dwellB)
-            if depA is None or arrB is None:
-                continue
             label = f"{nameA or f'{kmA:.3f}'} → {nameB or f'{kmB:.3f}'}"
-            interstationRows.append((label, arrB - depA))
+            # A leg the run never covered keeps its row, so the gap reads as no data instead of vanishing
+            legTime = None if depA is None or arrB is None else arrB - depA
+            interstationRows.append((label, legTime))
 
     return totalTime, originDestTime, interstationRows
 

@@ -1,6 +1,12 @@
 import numpy as np
 from collections import deque
 
+# Per vehicle kinematics arrays calculateKinematics writes, read by every plot, report and exporter
+KINEMATICS_RESULT_KEYS = ("kinematicsStationM", "kinematicsSpeedM", "kinematicsTimeS",
+                          "kinematicsAcceleration", "kinematicsForceTractionKN",
+                          "kinematicsForceBrakingKN", "kinematicsForceResistanceKN",
+                          "kinematicsDwellTimesS")
+
 class VehicleCalculator:
     def __init__(self, dataStorage):
         self.data = dataStorage
@@ -91,7 +97,7 @@ class VehicleCalculator:
                 "trainInitialSpeed": settings.get("trainInitialSpeed", 0.0),
                 "trainFinalSpeed": settings.get("trainFinalSpeed", 0.0),
                 "trainMaxSpeed": settings.get("trainMaxSpeed", settings.get("vInit", [120])[0]),
-                "trainBrakeDecel": settings.get("trainBrakeDecel", 1.0),
+                "trainBrakeDecel": settings.get("trainBrakeDecel", 0.45),
                 "trainRes": settings.get("trainRes", []),
                 "trainTrac": settings.get("trainTrac", []),
                 "trainParam": settings.get("trainParam", []),
@@ -116,7 +122,8 @@ class VehicleCalculator:
                 sStart = np.min(self.stationSpeedLimits) * 1000
                 sEnd = np.max(self.stationSpeedLimits) * 1000
             else:
-                # No data to run simulation on
+                # No chainage source at all, the skip is recorded so the GUI can report it
+                self.data[f"kinematicsWarning_{v_idx}"] = "noTrackData"
                 continue
 
             # Discretization step in meters
@@ -332,7 +339,7 @@ class VehicleCalculator:
             tracData = [tracData]
         self.trainTrac = tracData
 
-        self.trainBrakeDecel = float(v_data.get("trainBrakeDecel", 1.0))
+        self.trainBrakeDecel = float(v_data.get("trainBrakeDecel", 0.45))
         
         self.trainInitialSpeed = float(v_data.get("trainInitialSpeed", 0.0))
         self.trainFinalSpeed = float(v_data.get("trainFinalSpeed", 0.0))

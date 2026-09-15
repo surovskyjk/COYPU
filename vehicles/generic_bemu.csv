@@ -3,8 +3,9 @@ Meta,vehicleName,Generic BEMU
 Meta,maxSpeedKmh,160
 Meta,massTonnes,113.5
 Meta,lengthM,52.9
-Meta,brakeDecelMs2,1.0
+Meta,brakeDecelMs2,0.45
 Meta,maxTractiveForceKN,112.5
+Meta,maxCantDeficiencyMm,150
 Param,Generic BEMU,1.08,113.5,52.9
 Res,Generic BEMU,1.6616,0.00415,0.00017
 Trac,Generic BEMU,0,53.724,112.5,0,0

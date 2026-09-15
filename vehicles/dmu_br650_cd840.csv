@@ -3,8 +3,9 @@ Meta,vehicleName,DMU BR 650 (CD 840)
 Meta,maxSpeedKmh,120
 Meta,massTonnes,48.5
 Meta,lengthM,25.5
-Meta,brakeDecelMs2,1.0
+Meta,brakeDecelMs2,0.45
 Meta,maxTractiveForceKN,68.0
+Meta,maxCantDeficiencyMm,150
 Param,DMU BR 650 (CD 840),1.04,48.5,25.5
 Res,DMU BR 650 (CD 840),1.631,0,0.000601
 Trac,DMU BR 650 (CD 840),0,21.3,68,0,0

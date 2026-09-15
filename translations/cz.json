@@ -742,5 +742,21 @@
   "batchScenarioRMax": "R_max [m]",
   "batchScenarioRatioC": "Poměr C [%]",
   "batchProblemInvalidOptimizationRMax": "R_max musí být mezi 100 a 99000 m",
-  "batchProblemInvalidOptimizationRatio": "Poměr rozdělení posunu musí být mezi 0 a 100 %"
+  "batchProblemInvalidOptimizationRatio": "Poměr rozdělení posunu musí být mezi 0 a 100 %",
+  "groupProfile": "Rychlostní profil",
+  "profileSelectorLabel": "Rychlostní profil",
+  "profileSelectorTip": "Návrhový rychlostní profil pro simulaci, grafy a statistiky",
+  "profileBlockedNoData": "Pro tento profil zatím nejsou vypočtené rychlosti",
+  "profileBlockedCantDeficiency": "Profil {profile} není dostupný: aktivní vozidlo je schváleno do I = {limit} mm",
+  "profileNotCertified": "Vozidlo není schváleno pro aktivní rychlostní profil",
+  "speedProfileShared": "Podle aktivního rychlostního profilu",
+  "vehicleMaxCantDeficiency": "Max. nedostatek převýšení I [mm]:",
+  "vehicleMaxCantDeficiencyTip": "Nejvyšší nedostatek převýšení, pro který je vozidlo schváleno, omezuje volbu návrhových profilů",
+  "simulationFailed": "Simulace selhala",
+  "simulationNoTrackData": "Nejsou k dispozici data osy ani rychlostního profilu pro simulaci",
+  "statusSimulationNoProfile": "Není dostupný žádný rychlostní profil k simulaci",
+  "statusSimulationNoResults": "Simulace nevrátila žádné výsledky",
+  "statusSimulationProfiles": "Simulace profilu {index} z {count}",
+  "readoutProfileShort": "Vlim",
+  "readoutSpeedShort": "V"
 }

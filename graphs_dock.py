@@ -3,6 +3,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 
 from plot_widgets import CoypuPlotWidget
+import profile_state
 
 # Cant and cant deficiency curves drawn on the left axis of the geometry plot
 GEOMETRY_SERIES = [
@@ -52,6 +53,9 @@ CANT_RANGE = 500.0
 # Extra headroom above the fastest speed curve so the top line stays readable
 SPEED_RANGE_HEADROOM = 1.05
 
+# Opacity every speed ceiling except the active tier is drawn with
+INACTIVE_PROFILE_ALPHA = 0.3
+
 # Extra headroom around the curvature peak, replaces the old setYRange padding argument
 CURVATURE_RANGE_HEADROOM = 1.05
 
@@ -70,8 +74,12 @@ class PerformanceGraphsWidget(CoypuPlotWidget):
         self.plotSpeed.setXLink(self.plotGeometry)
         self.plotSlew.setXLink(self.plotGeometry)
 
+        # Tier the shared profile switcher points at, drawn heavier than the other ceilings
+        self.activeProfileKey = profile_state.DEFAULT_PROFILE_KEY
+
         # Threshold and zero guides of the slew plot, rebuilt whenever new profile data arrives
         self.slewGuides = []
+        self.slewThresholdM = None
         self.slewStationKm = np.array([], dtype=float)
         self.slewOffsetMm = np.array([], dtype=float)
 
@@ -185,14 +193,18 @@ class PerformanceGraphsWidget(CoypuPlotWidget):
 
         # Speed profile chainage arrays are already stored in kilometres, the limits in km/h
         limitFactor = 1.0 if self.useKmh else 1.0 / 3.6
+        activeSeriesKey = profile_state.storageKeysFor(self.activeProfileKey)[1]
         for seriesKey, stationKey, valueKey, labelKey in SPEED_SERIES:
             stations = dataStorage.get(stationKey)
             speeds = dataStorage.get(valueKey)
             if not (self.hasData(stations) and self.hasData(speeds)):
                 continue
+            isActiveProfile = seriesKey == activeSeriesKey
             self.setSeriesData("speed", seriesKey, stations,
                                np.asarray(speeds, dtype=float) * limitFactor,
                                name=self.lan.get(labelKey, labelKey), step=True, symbol="s",
+                               width=2 if isActiveProfile else None,
+                               alpha=None if isActiveProfile else INACTIVE_PROFILE_ALPHA,
                                isVisible=visibility.get(seriesKey, True))
 
         # Overlay the simulated running speed of every calculated vehicle
@@ -247,6 +259,7 @@ class PerformanceGraphsWidget(CoypuPlotWidget):
 
         self.slewStationKm = np.asarray(stations, dtype=float)
         self.slewOffsetMm = np.asarray(offsets, dtype=float)
+        self.slewThresholdM = dMaxM
 
         # Splitting on sign keeps the inward and outward halves individually coloured
         inwardValues = np.where(self.slewOffsetMm >= 0.0, self.slewOffsetMm, np.nan)
@@ -282,7 +295,9 @@ class PerformanceGraphsWidget(CoypuPlotWidget):
         self.slewGuides = []
 
     # Symmetric range around zero so the sign of the slew stays readable at a glance
-    def applySlewRange(self, dMaxM):
+    def applySlewRange(self, dMaxM=None):
+        # A view reset calls this with no argument, the stored envelope keeps the guides in frame
+        dMaxM = self.slewThresholdM if dMaxM is None else dMaxM
         peak = SLEW_MIN_RANGE_MM
         if self.slewOffsetMm.size:
             finiteValues = self.slewOffsetMm[np.isfinite(self.slewOffsetMm)]
@@ -315,17 +330,35 @@ class PerformanceGraphsWidget(CoypuPlotWidget):
         self.slewStationKm = np.array([], dtype=float)
         self.slewOffsetMm = np.array([], dtype=float)
 
-    # The shared readout gains the slew under the cursor once a profile is loaded
+    # Remember which permissible speed curve the shared profile switcher points at
+    def setActiveProfileKey(self, profileKey):
+        self.activeProfileKey = profileKey
+
+    # The shared readout names the active tier's ceiling, the simulated speed and the slew
     def updateReadout(self, value):
         super().updateReadout(value)
-        if self.readoutLabel is None or self.slewStationKm.size < 2:
+        if self.readoutLabel is None:
             return
-        slewMm = float(np.interp(value, self.slewStationKm, self.slewOffsetMm,
-                                 left=np.nan, right=np.nan))
-        if np.isnan(slewMm):
-            return
-        self.readoutLabel.setText(
-            f"{self.formatChainage(value)} | {self.lan.get('slewShort', 'dy')} {slewMm:+.1f} mm")
+
+        readoutParts = [self.formatChainage(value)]
+
+        activeSeriesKey = profile_state.storageKeysFor(self.activeProfileKey)[1]
+        limitValue = self.seriesValueAt("speed", activeSeriesKey, value)
+        if not np.isnan(limitValue):
+            readoutParts.append(f"{self.lan.get('readoutProfileShort', 'Vlim')} {limitValue:.0f}")
+
+        simulatedValue = self.seriesValueAt("speed", "simulated0", value)
+        if not np.isnan(simulatedValue):
+            readoutParts.append(f"{self.lan.get('readoutSpeedShort', 'V')} {simulatedValue:.0f}")
+
+        if self.slewStationKm.size >= 2:
+            slewMm = float(np.interp(value, self.slewStationKm, self.slewOffsetMm,
+                                     left=np.nan, right=np.nan))
+            if not np.isnan(slewMm):
+                readoutParts.append(
+                    f"{self.lan.get('slewShort', 'dy')} {slewMm:+.1f} mm")
+
+        self.readoutLabel.setText(" | ".join(readoutParts))
 
     # Guard used before touching any optional array
     def hasData(self, values):

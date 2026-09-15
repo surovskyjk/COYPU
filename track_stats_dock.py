@@ -3,21 +3,10 @@ from PySide6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QHeaderView,
                                QScrollArea, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 import numpy as np
 
+from profile_state import DEFAULT_PROFILE_KEY, ProfileSelectorBar
 from ui_kit import CollapsibleSection, DARK_CARD_TOKENS, LIGHT_CARD_TOKENS, MetricCard
 from vehicle_catalog import MAX_VEHICLES
 import batch_metrics
-
-# Design speed profiles offered by the profile selector, matches gui_overlay's MapSettingsDialog
-DESIGN_PROFILE_CHOICES = [
-    ("TTP", "TTP"),
-    ("100", "V100"),
-    ("130", "V130"),
-    ("150", "V150"),
-    ("K", "VK"),
-]
-
-# Design profile selected by default, matches MapWidget's own default speed profile
-DEFAULT_DESIGN_PROFILE = "150"
 
 # Row height used to size the segment tables without letting them grow unbounded
 TABLE_ROW_HEIGHT_PX = 22
@@ -34,6 +23,7 @@ class TrackStatisticsWidget(QWidget):
         self.lastDataStorage = {}
         self.vehicleNameResolver = None
         self.useKmh = False
+        self.activeProfileKey = DEFAULT_PROFILE_KEY
 
         scrollArea = QScrollArea(self)
         scrollArea.setWidgetResizable(True)
@@ -50,18 +40,11 @@ class TrackStatisticsWidget(QWidget):
         outerLayout.setContentsMargins(4, 4, 4, 4)
         outerLayout.setSpacing(4)
 
-        # Compact selector row, replaces two separate form rows
+        # Compact selector row, the profile half is the shared switcher mirrored from the ribbon
         selectorLayout = QHBoxLayout()
         selectorLayout.setSpacing(4)
-        self.designProfileRowLabel = QLabel()
-        self.designProfileCombo = QComboBox()
-        for profileKey, displayText in DESIGN_PROFILE_CHOICES:
-            self.designProfileCombo.addItem(displayText, profileKey)
-        defaultIndex = self.designProfileCombo.findData(DEFAULT_DESIGN_PROFILE)
-        self.designProfileCombo.setCurrentIndex(max(0, defaultIndex))
-        self.designProfileCombo.currentIndexChanged.connect(self.onDesignProfileChanged)
-        selectorLayout.addWidget(self.designProfileRowLabel)
-        selectorLayout.addWidget(self.designProfileCombo, 1)
+        self.profileSelector = ProfileSelectorBar(self.lan)
+        selectorLayout.addWidget(self.profileSelector, 1)
 
         self.vehicleRowLabel = QLabel()
         self.vehicleCombo = QComboBox()
@@ -277,12 +260,16 @@ class TrackStatisticsWidget(QWidget):
         self.vehicleCombo.setCurrentIndex(restoredIndex if restoredIndex >= 0 else 0)
         self.vehicleCombo.blockSignals(False)
 
-    # Re-render every section from the currently cached data storage
-    def refreshAll(self):
+    # Re-render every section from the currently cached data storage and active profile
+    def updateStatisticsView(self):
         self.refreshTrackLength()
         self.refreshDesignSpeedSection()
         self.refreshActualSpeedSection()
         self.refreshTravelTimeSection()
+
+    # Previous spelling of updateStatisticsView, kept so older call sites keep working
+    def refreshAll(self):
+        self.updateStatisticsView()
 
     def refreshTrackLength(self):
         length = self.computeTrackLength(self.lastDataStorage or {})
@@ -296,8 +283,7 @@ class TrackStatisticsWidget(QWidget):
         self.designSegmentTable.setHorizontalHeaderLabels(self.designSegmentHeaders())
 
         dataStorage = self.lastDataStorage or {}
-        profile = self.designProfileCombo.currentData() or DEFAULT_DESIGN_PROFILE
-        speeds, stations = self.resolveDesignSpeedArrays(dataStorage, profile)
+        speeds, stations = self.resolveDesignSpeedArrays(dataStorage, self.activeProfileKey)
 
         peak = self.globalMax(speeds, stations)
         if peak is None:
@@ -347,16 +333,16 @@ class TrackStatisticsWidget(QWidget):
         self.fillSegmentTable(self.actualSegmentTable, speeds, stations, boundaries,
                               self.formatActualSpeed, self.formatActualDistance)
 
-    def refreshTravelTimeSection(self):
-        dataStorage = self.lastDataStorage or {}
+    # Origin to destination and per leg running times of the active profile and vehicle
+    def calculateSectionalTravelTimes(self):
         vehicleIndex = self.vehicleCombo.currentData()
         if vehicleIndex is None:
-            self.totalTimeCard.setValue(self.noDataText())
-            self.originDestCard.setValue(self.noDataText())
-            self.interstationTable.setRowCount(0)
-            return
+            return None, None, []
+        # The stop chainages come from batch_metrics, which prefers the ones the engine actually ran
+        return self.computeTravelTimeSections(self.lastDataStorage or {}, vehicleIndex)
 
-        totalTime, originDestTime, legs = self.computeTravelTimeSections(dataStorage, vehicleIndex)
+    def refreshTravelTimeSection(self):
+        totalTime, originDestTime, legs = self.calculateSectionalTravelTimes()
         self.totalTimeCard.setValue(self.formatDuration(totalTime))
         self.originDestCard.setValue(self.formatDuration(originDestTime))
 
@@ -368,28 +354,28 @@ class TrackStatisticsWidget(QWidget):
             self.interstationTable.setItem(row, 1, QTableWidgetItem(self.formatDuration(legTime)))
         self.constrainTableHeight(self.interstationTable)
 
-    # Re-render the design speed section only, used by the profile selector
-    def onDesignProfileChanged(self, index):
-        self.refreshDesignSpeedSection()
-
     # Re-render the vehicle dependent sections only, used by the vehicle selector
     def onVehicleChanged(self, index):
         self.refreshActualSpeedSection()
         self.refreshTravelTimeSection()
 
-    # Main entry point called whenever alignment, TTP or simulation data changes
-    def updateStatistics(self, dataStorage, vehicleNameResolver=None, useKmh=False):
+    # Main entry point called whenever alignment, TTP, simulation data or the active profile changes
+    def updateStatistics(self, dataStorage, vehicleNameResolver=None, useKmh=False,
+                         activeProfileKey=None):
         self.lastDataStorage = dataStorage or {}
         self.vehicleNameResolver = vehicleNameResolver
         self.useKmh = bool(useKmh)
+        if activeProfileKey is not None:
+            self.activeProfileKey = activeProfileKey
+            self.profileSelector.applyActiveProfile(activeProfileKey)
         self.rebuildVehicleCombo()
-        self.refreshAll()
+        self.updateStatisticsView()
 
     # Refresh every caption, header and cached value after a language change
     def updateTexts(self, lan):
         self.lan = lan or {}
 
-        self.designProfileRowLabel.setText(self.lan.get("statsDesignProfileRow", "Design profile"))
+        self.profileSelector.updateTexts(self.lan)
         self.vehicleRowLabel.setText(self.lan.get("statsVehicleRow", "Vehicle"))
 
         self.lengthCard.setCaption(self.lan.get("statsCardLength", "Total length"))
@@ -409,7 +395,7 @@ class TrackStatisticsWidget(QWidget):
         ])
 
         self.rebuildVehicleCombo()
-        self.refreshAll()
+        self.updateStatisticsView()
 
     # Restyle the KPI cards and the tables with the active theme's tokens
     def applyTheme(self, isDark, tokens=None):

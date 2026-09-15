@@ -21,11 +21,8 @@ CHAINAGE_MAP_KEYS = ("chainageMapBaselineKm", "chainageMapActiveKm")
 # Design speed profiles the geometry engine derives on every run
 SPEED_PROFILE_SUFFIXES = ("100", "130", "150", "K")
 
-# Per vehicle kinematics arrays harvested back into the main data storage
-KINEMATICS_RESULT_KEYS = ("kinematicsStationM", "kinematicsSpeedM", "kinematicsTimeS",
-                          "kinematicsAcceleration", "kinematicsForceTractionKN",
-                          "kinematicsForceBrakingKN", "kinematicsForceResistanceKN",
-                          "kinematicsDwellTimesS")
+# Per vehicle kinematics arrays harvested back into the main data storage, owned by the engine
+KINEMATICS_RESULT_KEYS = vehicle_engine.KINEMATICS_RESULT_KEYS
 
 
 # Deepcopy only what the optimizer and both engines actually read, built on the GUI thread

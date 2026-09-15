@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QTabWidget, QApplication, QMainWindow, QPushButto
                                 QHBoxLayout, QVBoxLayout, QLabel, QPlainTextEdit, QFileDialog,
                                 QSplitter, QMessageBox, QStyle, QToolBar, QMenu, QStackedWidget,
                                 QStatusBar, QLineEdit, QTextEdit, QComboBox, QAbstractItemView,
-                                QToolButton, QSizePolicy)
+                                QToolButton, QSizePolicy, QProgressBar)
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QCursor, QDesktopServices
 
 # pyqtgraph imports
@@ -39,6 +39,9 @@ from xml_editor import XmlCodeEditor
 from translation_manager import TranslationManager
 from shortcut_manager import ShortcutManager
 import optimization_runner
+import profile_state
+import simulation_runner
+from profile_state import ProfileSelectorBar
 import slew_report
 from settings_dialog import ShortcutSettingsDialog
 from vehicle_dialog import VehicleSettingsDialog, VehicleCatalogDialog
@@ -265,6 +268,18 @@ class MainWindow(QMainWindow):
         self.baselineAlignmentCache = None
         self.slewReportWindow = None
 
+        # Shared active speed profile driving the ribbon, the graphs dock and the statistics dock
+        self.profileState = profile_state.ProfileStateManager(self)
+        self.profileState.activeProfileChanged.connect(self.onActiveProfileChanged)
+        self.profileState.availableProfilesChanged.connect(self.onAvailableProfilesChanged)
+
+        # Multi profile kinematics on an isolated thread, plus the cache every selector projects from
+        self.simulationController = simulation_runner.SimulationController(self)
+        self.simulationController.simulationFinished.connect(self.onSimulationFinished)
+        self.simulationController.simulationFailed.connect(self.onSimulationFailed)
+        self.simulationController.progressChanged.connect(self.onSimulationProgress)
+        self.simulationResultsByProfile = {}
+
         # State the group speed columns were last evaluated for, so two D+I passes are not repeated
         self.optimizationImpactSignatureCache = None
 
@@ -304,6 +319,7 @@ class MainWindow(QMainWindow):
         self.buildStatusBar()
         self.connectCursorSignals()
         self.connectMapSignals()
+        self.connectProfileSignals()
 
         self.buildFloatingCommandInput()
 
@@ -553,6 +569,9 @@ class MainWindow(QMainWindow):
         self.batchVariantCombo = QComboBox()
         self.batchVariantCombo.setMinimumWidth(180)
         self.batchVariantCombo.setToolTip(lan.get("batchVariantSelector", "Batch variant"))
+        # Shared profile switcher shown in the Simulation ribbon tab, mirrored by both docks
+        self.ribbonProfileSelector = ProfileSelectorBar(lan, isCompact=True)
+
         self.loadBatchVariantAction = QAction(lan.get("batchLoadVariant", "Load variant into viewport"), self)
         self.loadBatchVariantAction.triggered.connect(self.loadSelectedBatchVariant)
         self.refreshBatchVariantSelector()
@@ -806,11 +825,18 @@ class MainWindow(QMainWindow):
         self.dockTtpParsed.setWidget(self.tableTTP)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dockTtpParsed)
 
-        # Dock 2 - linked track geometry and speed profile graphs
+        # Dock 2 - linked track geometry and speed profile graphs, headed by the shared profile switcher
         self.graphsWidget = PerformanceGraphsWidget(lan)
+        self.graphsProfileSelector = ProfileSelectorBar(lan)
+        graphsContainer = QWidget()
+        graphsContainerLayout = QVBoxLayout(graphsContainer)
+        graphsContainerLayout.setContentsMargins(4, 2, 4, 0)
+        graphsContainerLayout.setSpacing(2)
+        graphsContainerLayout.addWidget(self.graphsProfileSelector)
+        graphsContainerLayout.addWidget(self.graphsWidget, 1)
         self.dockGraphs = LazyDockWidget(lan.get("dockGraphs", "Track geometry and speed profile"),
                                          "dockGraphs", self.refreshGraphsDock)
-        self.dockGraphs.setWidget(self.graphsWidget)
+        self.dockGraphs.setWidget(graphsContainer)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dockGraphs)
 
         # Remaining plot docks, all rendered with pyqtgraph
@@ -938,6 +964,10 @@ class MainWindow(QMainWindow):
         runGroup = simulationPage.addGroup(lan.get("groupCalculate", "Calculate"), "groupCalculate")
         runGroup.addAction(self.calculateTrainSpeedAction, shortKey="shortRunSimulation")
 
+        simulationProfileGroup = simulationPage.addGroup(lan.get("groupProfile", "Speed profile"),
+                                                        "groupProfile")
+        simulationProfileGroup.addWidget(self.ribbonProfileSelector)
+
         simulationConfigGroup = simulationPage.addGroup(lan.get("groupConfig", "Configuration"),
                                                         "groupConfig")
         simulationConfigGroup.addAction(self.vehicleSettingsAction, shortKey="shortVehicles")
@@ -1047,7 +1077,14 @@ class MainWindow(QMainWindow):
         self.statusChainageLabel = QLabel()
         self.statusThemeLabel = QLabel()
 
+        # Non modal progress of a running simulation, hidden whenever no run is in flight
+        self.statusSimulationProgress = QProgressBar()
+        self.statusSimulationProgress.setMaximumWidth(140)
+        self.statusSimulationProgress.setTextVisible(False)
+        self.statusSimulationProgress.hide()
+
         self.statusBarWidget.addWidget(self.statusEngineLabel, 1)
+        self.statusBarWidget.addPermanentWidget(self.statusSimulationProgress)
         self.statusBarWidget.addPermanentWidget(self.statusChainageLabel)
         self.statusBarWidget.addPermanentWidget(self.statusThemeLabel)
 
@@ -1191,6 +1228,8 @@ class MainWindow(QMainWindow):
             editor.applyTheme(isDark, tokens)
 
         self.workflowWidget.applyTheme(isDark, tokens)
+        for profileSelector in self.profileSelectors():
+            profileSelector.applyTheme(isDark, tokens)
         self.graphsWidget.applyTheme(isDark, tokens)
         self.profileWidget.applyTheme(isDark, tokens)
         self.kinematicsWidget.applyTheme(isDark, tokens)
@@ -1238,6 +1277,7 @@ class MainWindow(QMainWindow):
         self.graphsWidget.setUnitSystem(self.isKmhUnits())
         self.graphsWidget.setStations(self.collectStations())
         self.graphsWidget.updateGeometryData(lxml, self.seriesVisibility())
+        self.graphsWidget.setActiveProfileKey(self.profileState.activeProfileKey)
         self.graphsWidget.updateSpeedData(self.dataStorage, self.seriesVisibility())
         self.graphsWidget.updateSlewData(lxml, self.optimizationEnvelopeM())
 
@@ -1248,6 +1288,7 @@ class MainWindow(QMainWindow):
 
     # Everything that must follow a finished calculation, wired to both calculation signals
     def onCalculationFinished(self):
+        self.profileState.refreshAvailability(self.dataStorage)
         self.refreshOptimizationImpact()
         self.refreshGeometryReport()
         self.refreshVehicleReport()
@@ -1276,7 +1317,8 @@ class MainWindow(QMainWindow):
     # Recompute the Track Statistics dock from the current data storage
     def refreshTrackStatsDock(self):
         self.trackStatsWidget.updateStatistics(self.dataStorage, self.getVehicleName,
-                                               self.isKmhUnits())
+                                               self.isKmhUnits(),
+                                               self.profileState.activeProfileKey)
 
     # Map every series toggle action onto the series key used by the plots
     def seriesVisibility(self):
@@ -1562,6 +1604,7 @@ class MainWindow(QMainWindow):
     # Rebuild every table, source viewer, plot and the map from freshly loaded project data
     def refreshAfterProjectLoad(self):
         lxml = self.dataStorage.get("LandXML", {})
+        self.seedProfileCacheFromStorage()
 
         self.updateTableLandXML(lxml)
         self.tableTTP.setData({
@@ -1768,6 +1811,9 @@ class MainWindow(QMainWindow):
             self.batchController.waitForFinish()
         if self.optimizationController.isRunning():
             self.optimizationController.waitForFinish()
+        if self.simulationController.isRunning():
+            self.simulationController.cancelSimulation()
+            self.simulationController.waitForFinish()
         self.autoSaveTimer.stop()
         self.discardRecoverySnapshot()
         self.saveSession()
@@ -1893,6 +1939,9 @@ class MainWindow(QMainWindow):
 
         # Child widgets holding their own captions
         self.workflowWidget.updateTexts(lan)
+        for profileSelector in self.profileSelectors():
+            profileSelector.updateTexts(lan)
+        self.onAvailableProfilesChanged()
         self.graphsWidget.updateLabels(lan)
         self.profileWidget.updateLabels(lan)
         self.kinematicsWidget.updateLabels(lan)
@@ -2622,6 +2671,7 @@ class MainWindow(QMainWindow):
                 speedLimits = speedLimitsRaw
 
             self.dataStorage["stationSpeedLimits"] = stations
+            self.profileState.refreshAvailability(self.dataStorage)
             self.dataStorage["speedLimits"] = speedLimits
 
             # A fresh import replaces the whole TTP stack, not just the merged arrays
@@ -2903,7 +2953,8 @@ class MainWindow(QMainWindow):
                                         color=colorsSpeed[vIdx]))
             # Stop markers – vertical line at each station position
             axlines = []
-            trainStops = self.dataStorage.get("settingsData", {}).get("trainStops", [])
+            # Raw stops would miss the projected chainages entirely after an optimization
+            trainStops = batch_metrics.stopsList(self.dataStorage)
             for stop in trainStops:
                 try:
                     sM  = float(stop[0]) * 1000.0
@@ -2994,7 +3045,8 @@ class MainWindow(QMainWindow):
                                         color=colorsSpeed[vIdx]))
             # Stop markers – horizontal line at each station position
             axlines = []
-            trainStops = self.dataStorage.get("settingsData", {}).get("trainStops", [])
+            # Raw stops would miss the projected chainages entirely after an optimization
+            trainStops = batch_metrics.stopsList(self.dataStorage)
             for stop in trainStops:
                 try:
                     sM  = float(stop[0]) * 1000.0
@@ -3151,6 +3203,11 @@ class MainWindow(QMainWindow):
             self.dataStorage[f"speedLimitsT_{vIdx}"]              = []
             # Warning flag — remove entirely so downstream code gets None / missing key
             self.dataStorage.pop(f"kinematicsWarning_{vIdx}", None)
+
+        # A stale cache would be reprojected onto the flat keys the next time a tier is selected
+        self.simulationResultsByProfile = {}
+        self.dataStorage.pop("simulatedTrainStops", None)
+        self.profileState.refreshAvailability(self.dataStorage)
 
         self.reportVehicleTable.setData({})
         self.plotSpeedLimits()
@@ -3321,6 +3378,7 @@ class MainWindow(QMainWindow):
                                        tokens=self.themeManager.currentTokens, parent=self)
         if dialog.exec():
             self.dataStorage["settingsData"].update(dialog.getSettings())
+            self.profileState.refreshAvailability(self.dataStorage)
             self.rebuildVehicleReportMenus()
             self.markProjectModified()
             # Step 4 of the workflow guide covers the vehicle definition
@@ -3914,7 +3972,8 @@ class MainWindow(QMainWindow):
 
         # Train stops matched against the sampled stations
         metrics["stopsRows"] = []
-        trainStops = self.dataStorage.get("settingsData", {}).get("trainStops", [])
+        # Raw stops would miss the projected chainages entirely after an optimization
+        trainStops = batch_metrics.stopsList(self.dataStorage)
         if trainStops:
             for stop in trainStops:
                 try:
@@ -4642,43 +4701,197 @@ class MainWindow(QMainWindow):
             self.dockGraphs.show()
             self.dockGraphs.raise_()
 
+    # Evaluate every drivable speed profile tier in one click, on a worker thread
     def calculateTrainSpeed(self):
-        # The engine matches stops by absolute chainage, so it must see them on the active alignment
-        settings = self.dataStorage.setdefault("settingsData", {})
-        enteredStops = settings.get("trainStops")
-        settings["trainStops"] = self.projectedTrainStops()
-        try:
-            self.runVehicleSimulation()
-        finally:
-            if enteredStops is None:
-                settings.pop("trainStops", None)
-            else:
-                settings["trainStops"] = enteredStops
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        if self.simulationController.isRunning():
+            return
 
-    def runVehicleSimulation(self):
-        vehicle = vehicle_engine.VehicleCalculator(self.dataStorage)
-        vehicle.calculateKinematics()
-        
-        warnings = []
-        for i in range(vehicle_catalog.MAX_VEHICLES):
-            if self.dataStorage.get(f"kinematicsWarning_{i}") == "train_too_long":
-                warnings.append(str(i+1))
-                
-        if warnings:
-            lan = self.translationManager.getLanguage(self.currentLanguage)
-            msg = lan["train_too_long"] + f" (Vehicle: {', '.join(warnings)})"
-            QMessageBox.warning(self, lan["error"], msg)
+        vehicles = profile_state.vehicleSettingsList(self.dataStorage)
+        profileKeys = simulation_runner.evaluableProfileKeys(self.dataStorage, vehicles)
+        if not profileKeys:
+            self.setEngineStatus(lan.get("statusSimulationNoProfile",
+                                         "No speed profile is available to simulate"))
+            return
 
-        vehicle.speedLimitsToTime()
+        self.setBatchActionsEnabled(False)
+        self.statusSimulationProgress.setMaximum(len(profileKeys))
+        self.statusSimulationProgress.setValue(0)
+        self.statusSimulationProgress.show()
+        # Stops are projected here on the GUI thread, only the worker's own copy ever carries them
+        self.simulationController.startSimulation(self.dataStorage, profileKeys,
+                                                  self.projectedTrainStops())
 
-        self.plotKinematics()
+    # One tier finished, the status bar advances without ever blocking the event loop
+    def onSimulationProgress(self, completedCount, totalCount):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        self.statusSimulationProgress.setMaximum(max(totalCount, 1))
+        self.statusSimulationProgress.setValue(completedCount)
+        template = lan.get("statusSimulationProfiles", "Simulating profile {index} of {count}")
+        self.setEngineStatus(template.format(index=min(completedCount + 1, totalCount),
+                                             count=totalCount))
+
+    # Harvest the worker's cache, project the active tier onto the flat keys and refresh everything
+    def onSimulationFinished(self, payload):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        self.setBatchActionsEnabled(True)
+        self.statusSimulationProgress.hide()
+
+        self.simulationResultsByProfile = payload.get("resultsByProfile", {})
+        # Travel times must be read on exactly the stationing the engine ran against
+        self.dataStorage["simulatedTrainStops"] = payload.get("projectedTrainStops", [])
+        self.profileState.refreshAvailability(self.dataStorage)
+        self.applyActiveProfileResults()
         self.rebuildVehicleReportMenus()
         self.vehicleCalculationFinished.emit()
+        self.reportSimulationWarnings()
 
         # Step 7 of the workflow guide covers the running simulation
         self.workflowWidget.markCompleted(6)
-        self.setEngineStatus(self.translationManager.getLanguage(self.currentLanguage).get("statusSimulationDone", "Simulation finished"))
+        evaluatedKeys = payload.get("evaluatedProfileKeys", [])
+        if not evaluatedKeys:
+            self.setEngineStatus(lan.get("statusSimulationNoResults",
+                                         "Simulation produced no results"))
+        else:
+            doneText = lan.get("statusSimulationDone", "Simulation finished")
+            self.setEngineStatus(f"{doneText} ({', '.join(evaluatedKeys)})")
         self.markProjectModified()
+
+    def onSimulationFailed(self, message):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        self.setBatchActionsEnabled(True)
+        self.statusSimulationProgress.hide()
+        self.setEngineStatus(lan.get("simulationFailed", "Simulation failed"))
+        QMessageBox.critical(self, lan.get("error", "Error"), str(message))
+
+    # Every vehicle the active tier could not fully simulate, paired with its warning key
+    def collectSimulationWarnings(self):
+        warnings = []
+        for vehicleIndex in range(vehicle_catalog.MAX_VEHICLES):
+            warningKey = self.dataStorage.get(f"kinematicsWarning_{vehicleIndex}")
+            if warningKey:
+                warnings.append((vehicleIndex, warningKey))
+        return warnings
+
+    # Collapse every vehicle warning of the active tier into a single message box
+    def reportSimulationWarnings(self):
+        warnings = self.collectSimulationWarnings()
+        if not warnings:
+            return
+
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        warningTexts = {
+            "train_too_long": lan.get("train_too_long", "Train is longer than the section"),
+            "noTrackData": lan.get("simulationNoTrackData",
+                                   "No alignment or speed profile data to simulate against"),
+            simulation_runner.WARNING_NOT_CERTIFIED: lan.get(
+                "profileNotCertified", "Vehicle is not certified for the active speed profile"),
+        }
+        warningLines = []
+        for vehicleIndex, warningKey in warnings:
+            caption = f'{lan.get("vehicle", "Vehicle")} {vehicleIndex + 1}'
+            warningLines.append(f"{caption}: {warningTexts.get(warningKey, warningKey)}")
+        QMessageBox.warning(self, lan.get("error", "Error"), "\n".join(warningLines))
+
+    # Copy the active tier's cached arrays onto the flat kinematics keys every consumer already reads
+    def applyActiveProfileResults(self):
+        # With nothing cached there is nothing to project, so a loaded project keeps its own arrays
+        if not self.simulationResultsByProfile:
+            return
+
+        profileResults = self.simulationResultsByProfile.get(
+            self.profileState.activeProfileKey) or {}
+
+        for vehicleIndex in range(vehicle_catalog.MAX_VEHICLES):
+            vehicleResults = profileResults.get(str(vehicleIndex)) or {}
+            for resultKey in simulation_runner.PROFILE_RESULT_KEYS:
+                # A missing entry writes an empty array, so the previous tier can never linger
+                values = vehicleResults.get(resultKey)
+                self.dataStorage[f"{resultKey}_{vehicleIndex}"] = [] if values is None else values
+            warningKey = vehicleResults.get("kinematicsWarning")
+            if warningKey:
+                self.dataStorage[f"kinematicsWarning_{vehicleIndex}"] = warningKey
+            else:
+                self.dataStorage.pop(f"kinematicsWarning_{vehicleIndex}", None)
+
+        self.dataStorage["num_vehicles"] = len(profile_state.vehicleSettingsList(self.dataStorage))
+        self.plotKinematics()
+
+    # Rebuild a single tier cache entry from the flat arrays a loaded project restored
+    def seedProfileCacheFromStorage(self):
+        self.profileState.refreshAvailability(self.dataStorage)
+        activeProfileKey = self.dataStorage.get("activeProfileKey",
+                                                self.profileState.activeProfileKey)
+
+        resultsByVehicle = {}
+        hasAnyResult = False
+        for vehicleIndex in range(vehicle_catalog.MAX_VEHICLES):
+            vehicleResults = {}
+            for resultKey in simulation_runner.PROFILE_RESULT_KEYS:
+                values = self.dataStorage.get(f"{resultKey}_{vehicleIndex}")
+                vehicleResults[resultKey] = values
+                hasAnyResult = hasAnyResult or (values is not None and len(values) > 0)
+            vehicleResults["kinematicsWarning"] = self.dataStorage.get(
+                f"kinematicsWarning_{vehicleIndex}")
+            resultsByVehicle[str(vehicleIndex)] = vehicleResults
+
+        # Only the saved tier can be restored, the others need a fresh Simulate to be populated
+        self.simulationResultsByProfile = {activeProfileKey: resultsByVehicle} if hasAnyResult else {}
+        self.profileState.setActiveProfile(activeProfileKey)
+
+    # Every synchronised profile selector, so one loop keeps the ribbon and both docks in step
+    def profileSelectors(self):
+        return (self.ribbonProfileSelector, self.graphsProfileSelector,
+                self.trackStatsWidget.profileSelector)
+
+    # Connect every profile selector to the shared state and seed the initial availability
+    def connectProfileSignals(self):
+        for selector in self.profileSelectors():
+            selector.profileSelectionRequested.connect(self.onProfileSelectionRequested)
+        self.profileState.refreshAvailability(self.dataStorage)
+
+    # A selector asked for a tier, the shared state decides whether it is actually allowed
+    def onProfileSelectionRequested(self, profileKey):
+        self.profileState.setActiveProfile(profileKey)
+
+    # Shared active tier changed, mirror it into every selector and reproject the cached results
+    def onActiveProfileChanged(self, profileKey):
+        self.dataStorage["activeProfileKey"] = profileKey
+        for selector in self.profileSelectors():
+            selector.applyActiveProfile(profileKey)
+        self.graphsWidget.setActiveProfileKey(profileKey)
+        self.applyActiveProfileResults()
+        self.refreshTrackStatsDock()
+        self.dockGraphs.requestUpdate()
+
+    # Permitted tier set changed, repaint every selector's enabled rows and blocked tooltips
+    def onAvailableProfilesChanged(self):
+        reasonTexts = self.buildProfileBlockedTexts()
+        for selector in self.profileSelectors():
+            selector.applyAvailability(self.profileState.permittedProfileKeys, reasonTexts)
+
+    # Explain, per tier, why it cannot currently be selected
+    def buildProfileBlockedTexts(self):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        vehicles = profile_state.vehicleSettingsList(self.dataStorage)
+        reasonTexts = {}
+
+        for profileKey in profile_state.PROFILE_KEYS:
+            if not profile_state.hasProfileData(self.dataStorage, profileKey):
+                reasonTexts[profileKey] = lan.get(
+                    "profileBlockedNoData", "This profile has no calculated speed limits yet")
+                continue
+            blockingNumbers = profile_state.blockingVehicleNumbers(profileKey, vehicles)
+            if not blockingNumbers:
+                continue
+            template = lan.get(
+                "profileBlockedCantDeficiency",
+                "Profile {profile} unavailable: active vehicle certified up to I = {limit} mm")
+            blockedVehicle = vehicles[blockingNumbers[0] - 1]
+            reasonTexts[profileKey] = template.format(
+                profile=profile_state.profileShortName(profileKey),
+                limit=f"{profile_state.vehicleMaxCantDeficiency(blockedVehicle):g}")
+        return reasonTexts
 
     def updateMapWithSpeeds(self):
         lxml = self.dataStorage.get("LandXML", {})
