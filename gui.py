@@ -2307,6 +2307,26 @@ class MainWindow(QMainWindow):
             "elevation": "stationVertical"
         }
 
+        # One keep decision per element, taken once so the element stream, the per type geometry
+        # arrays and the per element polylines all drop exactly the same elements at the overlap.
+        # Cropping only the element stream would leave the type arrays long, and every element past
+        # the seam would then read the coordinates of a neighbour. The seam tolerance drops an element
+        # that clears the crop by rounding dust alone, which would otherwise survive with its station
+        # span clamped to zero while its coordinates stayed full length.
+        newStationHorizontal = np.asarray(newData.get("stationHorizontal", []), dtype=float)
+        elementKeepPairs = np.zeros(len(newStationHorizontal), dtype=bool)
+        seamToleranceKm = landxml_merger.SEAM_TOLERANCE_KM
+        for i in range(0, len(newStationHorizontal), 2):
+            endIdx = min(i + 1, len(newStationHorizontal) - 1)
+            if isAppend:
+                keep = newStationHorizontal[endIdx] > cropStation + seamToleranceKm
+            else:
+                keep = newStationHorizontal[i] < cropStation - seamToleranceKm
+            elementKeepPairs[i] = keep
+            elementKeepPairs[endIdx] = keep
+        elementKeep = elementKeepPairs[::2]
+        typeMasks = landxml_merger.elementTypeMasks(newData.get("geometryType", []), elementKeep)
+
         def mergeArrays(key):
             if key not in oldData or key not in newData:
                 return oldData.get(key, newData.get(key, []))
@@ -2330,13 +2350,8 @@ class MainWindow(QMainWindow):
                 newStations = np.array(newData[sKey])
                 
                 if sKey == "stationHorizontal":
-                    mask = np.zeros(len(newStations), dtype=bool)
-                    # Zpracování polí definovaných v párech (počátek-konec segmentu)
-                    for i in range(0, len(newStations), 2):
-                        if isAppend: keep = newStations[i+1] > cropStation
-                        else: keep = newStations[i] < cropStation
-                        mask[i] = keep
-                        if i+1 < len(newStations): mask[i+1] = keep
+                    # Pole definovaná v párech (počátek-konec segmentu) sdílejí jedno rozhodnutí na prvek
+                    mask = elementKeepPairs
                             
                     if key == "stationHorizontal":
                         if isinstance(newArr, np.ndarray): newArr = np.copy(newArr)
@@ -2348,9 +2363,10 @@ class MainWindow(QMainWindow):
                                 elif not isAppend and (i+1) < len(newArr) and newArr[i+1] > cropStation: newArr[i+1] = cropStation
                 else:
                     mask = newStations > cropStation if isAppend else newStations < cropStation
-            elif key in ["alignmentCoordinates", "alignmentCoordsOriginal"]:
-                if isAppend: return oldArr + newArr
-                else: return newArr + oldArr
+            elif key in landxml_merger.ELEMENT_TYPE_OF_KEY:
+                mask = typeMasks[landxml_merger.ELEMENT_TYPE_OF_KEY[key]]
+            elif key in landxml_merger.ELEMENT_LIST_KEYS:
+                mask = elementKeep
             else:
                 if isinstance(oldArr, np.ndarray) and isinstance(newArr, np.ndarray):
                     if isAppend: return np.concatenate((oldArr, newArr))

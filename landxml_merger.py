@@ -19,6 +19,36 @@ PASSTHROUGH_LIST_KEYS = ("keyLat", "keyLon")
 # Coordinate-list keys combined by plain list concatenation, never offset
 LIST_CONCAT_KEYS = ("alignmentCoordinates", "alignmentCoordsOriginal")
 
+# Per-element arrays addressed by their own element type's running counter rather than by element
+# index, so a crop that drops an element from geometryType must drop its entry here in the same pass
+ELEMENT_ARRAY_KEYS = {
+    "Line": ("lineStartX", "lineStartY", "lineEndX", "lineEndY", "lineStationStart"),
+    "Spiral": ("spiralStartX", "spiralStartY", "spiralEndX", "spiralEndY", "spiralPIX", "spiralPIY",
+               "spiralStationStart", "spiralLength", "spiralRadiusStart", "spiralRadiusEnd",
+               "spiralRot", "spiralType", "spiralConst"),
+    "Curve": ("curveStartX", "curveStartY", "curveEndX", "curveEndY", "curveCenterX", "curveCenterY",
+              "curveStationStart", "curveRot", "curveType", "curveRadius"),
+}
+
+# Which element type owns a given per-element array, the reverse of ELEMENT_ARRAY_KEYS
+ELEMENT_TYPE_OF_KEY = {key: elementType
+                       for elementType, keys in ELEMENT_ARRAY_KEYS.items()
+                       for key in keys}
+
+# Element indexed lists holding one polyline per element, cropped alongside the element stream
+ELEMENT_LIST_KEYS = ("alignmentCoordinates", "alignmentCoordsOriginal")
+
+
+# Split one keep decision per element into the per type masks the element arrays are indexed by
+def elementTypeMasks(geometryType, elementKeep):
+    elementTypes = list(np.asarray(geometryType)[::2])
+    masks = {elementType: [] for elementType in ELEMENT_ARRAY_KEYS}
+    for elementIndex, elementType in enumerate(elementTypes):
+        if elementType in masks and elementIndex < len(elementKeep):
+            masks[elementType].append(bool(elementKeep[elementIndex]))
+    return {elementType: np.array(values, dtype=bool) for elementType, values in masks.items()}
+
+
 # Distance beyond which a junction gap is reported to the user
 JUNCTION_GAP_WARN_M = 100.0
 
