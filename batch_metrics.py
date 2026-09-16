@@ -42,6 +42,20 @@ def stopsList(dataStorage):
     return stops
 
 
+# Sign of the run along the chainage axis, negative when the train drives against the stationing
+def runDirectionSign(stationsM):
+    if not hasData(stationsM) or len(stationsM) < 2:
+        return 1.0
+    return -1.0 if float(stationsM[-1]) < float(stationsM[0]) else 1.0
+
+
+# Stops in the order the run actually reaches them, whatever order the timetable listed them in
+def orderStopsForRun(stops, stationsM):
+    directionSign = runDirectionSign(stationsM)
+    # A stable sort keeps two stops sharing a chainage in the order the timetable listed them
+    return sorted(stops, key=lambda stop: directionSign * float(stop[0]))
+
+
 # Track length in kilometres derived from the parsed alignment chainage
 def computeTrackLengthKm(dataStorage):
     stationHorizontal = dataStorage.get("LandXML", {}).get("stationHorizontal")
@@ -77,7 +91,8 @@ def computeTravelTimeSections(dataStorage, vehicleIndex):
     timesS = dataStorage.get(f"kinematicsTimeS_{vehicleIndex}")
     totalTime = float(timesS[-1]) if hasData(timesS) else None
 
-    stops = stopsList(dataStorage)
+    # Ordering by the direction of travel is what keeps a reversed run from reporting negative legs
+    stops = orderStopsForRun(stopsList(dataStorage), stationsM)
     originDestTime = None
     interstationRows = []
 

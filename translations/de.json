@@ -758,5 +758,7 @@
   "statusSimulationNoResults": "Die Simulation lieferte keine Ergebnisse",
   "statusSimulationProfiles": "Simuliere Profil {index} von {count}",
   "readoutProfileShort": "Vlim",
-  "readoutSpeedShort": "V"
+  "readoutSpeedShort": "V",
+  "runAgainstStationingTip": "Die gesamte Simulation fährt von der höchsten zur niedrigsten Station",
+  "shortRunDirection": "Richtung\numkehren"
 }

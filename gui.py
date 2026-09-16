@@ -99,6 +99,7 @@ ACTION_ICONS = {
     "mapSettingsAction": "map",
     "geometrySettingsAction": "settings",
     "vehicleSettingsAction": "vehicle",
+    "reverseDirectionAction": "stops",
     "stopsSettingsAction": "stops",
     "speedSettingsAction": "settings",
     "designApproachAction": "settings",
@@ -503,6 +504,15 @@ class MainWindow(QMainWindow):
         self.toggleSlewPlotAction.setProperty(SERIES_TOGGLE_PROPERTY, True)
         self.toggleSlewPlotAction.toggled.connect(self.onSlewPlotToggled)
         self.toggleSlewPlotAction.setEnabled(False)
+
+        self.reverseDirectionAction = QAction(lan.get("runAgainstStationing",
+                                                       "Run against stationing"), self)
+        self.reverseDirectionAction.setCheckable(True)
+        self.reverseDirectionAction.setProperty(SERIES_TOGGLE_PROPERTY, True)
+        self.reverseDirectionAction.setToolTip(lan.get(
+            "runAgainstStationingTip",
+            "Drive the whole simulation from the highest chainage towards the lowest"))
+        self.reverseDirectionAction.toggled.connect(self.onRunDirectionToggled)
 
         self.includeSlewSectionAction = QAction(lan.get("includeSlewSection", "Append Slew Summary"), self)
         self.includeSlewSectionAction.setCheckable(True)
@@ -963,6 +973,7 @@ class MainWindow(QMainWindow):
                                                 "ribbonSimulation")
         runGroup = simulationPage.addGroup(lan.get("groupCalculate", "Calculate"), "groupCalculate")
         runGroup.addAction(self.calculateTrainSpeedAction, shortKey="shortRunSimulation")
+        runGroup.addAction(self.reverseDirectionAction, isLarge=False, shortKey="shortRunDirection")
 
         simulationProfileGroup = simulationPage.addGroup(lan.get("groupProfile", "Speed profile"),
                                                         "groupProfile")
@@ -1621,6 +1632,7 @@ class MainWindow(QMainWindow):
         self.updateOptimizationActionState()
         self.toggleSlewPlotAction.setChecked(bool(lxml.get("slewProfileOffsetMm") is not None
                                                   and len(lxml.get("slewProfileOffsetMm", [])) > 0))
+        self.applyStoredRunDirection()
         self.plotCant()
         self.plotCurvature()
         self.plotProfile()
@@ -1892,6 +1904,10 @@ class MainWindow(QMainWindow):
         self.slewReportAction.setText(lan.get("slewReport", "Slew Report"))
         self.toggleSlewPlotAction.setText(lan.get("toggleSlewPlot", "Toggle Slew Plot"))
         self.includeSlewSectionAction.setText(lan.get("includeSlewSection", "Append Slew Summary"))
+        self.reverseDirectionAction.setText(lan.get("runAgainstStationing", "Run against stationing"))
+        self.reverseDirectionAction.setToolTip(lan.get(
+            "runAgainstStationingTip",
+            "Drive the whole simulation from the highest chainage towards the lowest"))
         if self.slewReportWindow is not None:
             self.slewReportWindow.updateTexts(lan)
         self.updateUnitsActionLabel()
@@ -3378,6 +3394,8 @@ class MainWindow(QMainWindow):
                                        tokens=self.themeManager.currentTokens, parent=self)
         if dialog.exec():
             self.dataStorage["settingsData"].update(dialog.getSettings())
+            # A newly added vehicle carries no direction of its own, so the shared one is restamped
+            self.applyRunDirectionToVehicles()
             self.profileState.refreshAvailability(self.dataStorage)
             self.rebuildVehicleReportMenus()
             self.markProjectModified()
@@ -3973,7 +3991,8 @@ class MainWindow(QMainWindow):
         # Train stops matched against the sampled stations
         metrics["stopsRows"] = []
         # Raw stops would miss the projected chainages entirely after an optimization
-        trainStops = batch_metrics.stopsList(self.dataStorage)
+        trainStops = batch_metrics.orderStopsForRun(batch_metrics.stopsList(self.dataStorage),
+                                                    stations)
         if trainStops:
             for stop in trainStops:
                 try:
@@ -4700,6 +4719,28 @@ class MainWindow(QMainWindow):
         if isChecked:
             self.dockGraphs.show()
             self.dockGraphs.raise_()
+
+    # Push the shared direction down onto every vehicle, which is where the engine still reads it
+    def applyRunDirectionToVehicles(self):
+        settingsData = self.dataStorage.setdefault("settingsData", {})
+        simulation_runner.applyRunDirection(settingsData,
+                                            self.reverseDirectionAction.isChecked())
+
+    # The ribbon toggle owns the travel direction, so a cached run is no longer valid for it
+    def onRunDirectionToggled(self, isChecked):
+        self.applyRunDirectionToVehicles()
+        self.markProjectModified()
+        # Re-running keeps the plots, the statistics and the cache describing the same journey
+        if self.simulationResultsByProfile and not self.simulationController.isRunning():
+            self.calculateTrainSpeed()
+
+    # Mirror the stored direction into the ribbon toggle without echoing a project modification back
+    def applyStoredRunDirection(self):
+        isReversed = simulation_runner.isRunReversed(self.dataStorage)
+        self.reverseDirectionAction.blockSignals(True)
+        self.reverseDirectionAction.setChecked(isReversed)
+        self.reverseDirectionAction.blockSignals(False)
+        self.applyRunDirectionToVehicles()
 
     # Evaluate every drivable speed profile tier in one click, on a worker thread
     def calculateTrainSpeed(self):

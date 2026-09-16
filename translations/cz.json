@@ -758,5 +758,7 @@
   "statusSimulationNoResults": "Simulace nevrátila žádné výsledky",
   "statusSimulationProfiles": "Simulace profilu {index} z {count}",
   "readoutProfileShort": "Vlim",
-  "readoutSpeedShort": "V"
+  "readoutSpeedShort": "V",
+  "runAgainstStationingTip": "Celá simulace pojede od nejvyššího staničení k nejnižšímu",
+  "shortRunDirection": "Opačný\nsměr"
 }

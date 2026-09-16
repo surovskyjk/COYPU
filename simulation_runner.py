@@ -18,6 +18,22 @@ PROFILE_RESULT_KEYS = vehicle_engine.KINEMATICS_RESULT_KEYS + SPEED_LIMIT_RESULT
 # Warning recorded against a vehicle the active tier exceeds its certified cant deficiency
 WARNING_NOT_CERTIFIED = "profileNotCertified"
 
+# Project level travel direction, it describes the run rather than any one vehicle
+RUN_REVERSED_KEY = "runReversed"
+
+
+# True when the project drives against the stationing, so the run starts at the highest chainage
+def isRunReversed(dataStorage):
+    settingsData = (dataStorage or {}).get("settingsData", {}) or {}
+    return bool(settingsData.get(RUN_REVERSED_KEY, False))
+
+
+# Stamp the one shared direction onto every vehicle, which is where the engine still reads it
+def applyRunDirection(settingsData, isReversed):
+    settingsData[RUN_REVERSED_KEY] = bool(isReversed)
+    for vehicleSettings in settingsData.get("vehicles", []) or []:
+        vehicleSettings[RUN_REVERSED_KEY] = bool(isReversed)
+
 
 # Deepcopy only what the vehicle engine reads, built on the GUI thread with the projected stops baked in
 def buildSimulationStorage(dataStorage, projectedTrainStops):
@@ -30,6 +46,9 @@ def buildSimulationStorage(dataStorage, projectedTrainStops):
 
     # The engine matches stops by absolute chainage, so the worker owns them already projected
     workerStorage["settingsData"]["trainStops"] = copy.deepcopy(list(projectedTrainStops or []))
+
+    # The shared direction wins over whatever a vehicle carried from an older project file
+    applyRunDirection(workerStorage["settingsData"], isRunReversed(workerStorage))
 
     for profileKey in profile_state.PROFILE_KEYS:
         for storageKey in profile_state.storageKeysFor(profileKey):

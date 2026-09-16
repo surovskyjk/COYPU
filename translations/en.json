@@ -758,5 +758,7 @@
   "statusSimulationNoResults": "Simulation produced no results",
   "statusSimulationProfiles": "Simulating profile {index} of {count}",
   "readoutProfileShort": "Vlim",
-  "readoutSpeedShort": "V"
+  "readoutSpeedShort": "V",
+  "runAgainstStationingTip": "Drive the whole simulation from the highest chainage towards the lowest",
+  "shortRunDirection": "Reverse\ndirection"
 }

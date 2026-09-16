@@ -3,7 +3,7 @@ import csv
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPushButton,
                                QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
@@ -239,9 +239,6 @@ class VehicleTab(QWidget):
             "vehicleMaxCantDeficiencyTip",
             "Highest cant deficiency this vehicle is certified for, gating the design speed profiles"))
 
-        self.checkReverse = QCheckBox(lan.get("runAgainstStationing", "Run against stationing"))
-        self.checkReverse.setChecked(self.vehicleData.get("runReversed", False))
-
         gridLayout.addWidget(QLabel(lan.get("catalogVehicleLabel", "Catalog:")), 0, 0)
         gridLayout.addWidget(self.comboCatalog, 0, 1)
         gridLayout.addWidget(QLabel(lan.get("vehicleNameField", "Vehicle name:")), 0, 2)
@@ -264,7 +261,6 @@ class VehicleTab(QWidget):
 
         gridLayout.addWidget(QLabel(lan.get("vehicleMaxCantDeficiency", "Max cant deficiency I [mm]:")), 4, 0)
         gridLayout.addWidget(self.inputMaxCantDeficiency, 4, 1)
-        gridLayout.addWidget(self.checkReverse, 4, 2, 1, 2)
 
         gridLayout.addWidget(QLabel(lan.get("speed_profile", "Speed Profile:")), 5, 0)
         gridLayout.addWidget(self.comboProfile, 5, 1)
@@ -445,7 +441,8 @@ class VehicleTab(QWidget):
             "trainRes": [],
             "trainTrac": [],
             "trainParam": [],
-            "runReversed": self.checkReverse.isChecked()
+            # The travel direction belongs to the run, so the ribbon toggle owns it and this preserves it
+            "runReversed": bool(self.vehicleData.get("runReversed", False)),
         }
 
         # A None entry means this vehicle follows the shared tier, so it carries no pinned profile
