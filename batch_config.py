@@ -1,6 +1,7 @@
 # Batch configuration schema, JSON preset persistence and variant cross-product expansion
 import json
 
+import basemap_key
 import geometry_engine
 
 BATCH_CONFIG_VERSION = 1
@@ -163,7 +164,13 @@ class BatchConfigStore:
     # Load a batch config preset from a JSON file
     def loadConfig(self, filePath):
         with open(filePath, encoding="utf-8") as fileHandle:
-            return json.load(fileHandle)
+            configData = json.load(fileHandle)
+        # Presets saved by older versions may carry a basemap key in their settings copy, and the
+        # batch export writes that copy into a shareable archive
+        baseSettings = configData.get("baseSettings") if isinstance(configData, dict) else None
+        if isinstance(baseSettings, dict):
+            baseSettings.pop(basemap_key.LEGACY_SETTINGS_KEY, None)
+        return configData
 
     # Persist a batch config preset to a JSON file
     def saveConfig(self, filePath, configData):

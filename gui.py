@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 # Local imports
 import readfile
+import basemap_key
 import gui_overlay
 from map_viewer import MapWidget
 import default_values
@@ -768,7 +769,6 @@ class MainWindow(QMainWindow):
 
         # View 1 is the interactive alignment map
         self.mapWidget = MapWidget(self, self.translationManager.getLanguage(self.currentLanguage))
-        self.mapWidget.setSettingsData(self.dataStorage.get("settingsData", {}))
         self.mapWidget.mapFailed.connect(self.onMapFailed)
         self.centralStack.addWidget(self.mapWidget)
 
@@ -3315,16 +3315,25 @@ class MainWindow(QMainWindow):
     # Map settings
     def openMapSettings(self):
         lan = self.translationManager.getLanguage(self.currentLanguage)
-        settingsData = self.dataStorage.setdefault("settingsData", {})
         dialog = gui_overlay.MapSettingsDialog(self.epsgInput, self.mapWidget.currentBaseMap,
                                                self.mapWidget.drawMode, self.mapWidget.speedProfile,
-                                               lan, self, settingsData.get("mapBasemapApiKey", ""))
+                                               lan, self, self.mapWidget.cartoApiKey)
         if dialog.exec():
             self.epsgInput, selectedMap, drawMode, speedProfile = dialog.getMapSettings()
-            settingsData["mapBasemapApiKey"] = dialog.getBasemapApiKey()
-            self.mapWidget.setSettingsData(settingsData)
+            self.storeCartoApiKey(dialog.getBasemapApiKey(), lan)
             self.mapWidget.setBaseMap(selectedMap)
             self.mapWidget.setDrawOptions(drawMode, speedProfile)
+
+    # Keep a changed CARTO key in the credential vault only, an empty field removes it
+    def storeCartoApiKey(self, apiKey, lan):
+        if apiKey == self.mapWidget.cartoApiKey:
+            return
+        isStored = basemap_key.saveKey(apiKey) if apiKey else basemap_key.deleteKey()
+        if not isStored:
+            self.setEngineStatus(lan.get(
+                "mapApiKeyVaultFailed",
+                "The CARTO key could not be saved securely and applies to this session only"))
+        self.mapWidget.setCartoApiKey(apiKey)
 
     # Custom shortcuts and command aliases
     def openShortcutSettings(self):

@@ -22,3 +22,6 @@ folium==0.20.0
 
 # Colour-scale colormaps for the speed-coloured map view (folium dependency, used directly)
 branca==0.8.2
+
+# Operating system credential vault for the CARTO basemap key (Windows Credential Manager)
+keyring==25.7.0

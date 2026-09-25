@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QByteArray
 
+import basemap_key
 import project_metadata
 import source_stack
 import theme_manager
@@ -195,9 +196,12 @@ class ProjectFileManager:
     def collectVehicleConfiguration(self, mainWindow):
         settingsData = mainWindow.dataStorage.get("settingsData", {})
         vehicles = settingsData.get("vehicles", [])
+        # A basemap key never travels with a project, a shared file would share the key with it
+        savedSettings = {keyName: value for keyName, value in settingsData.items()
+                         if keyName != basemap_key.LEGACY_SETTINGS_KEY}
         return {
             "vehicleCount": len(vehicles) or 1,
-            "settingsData": encodeValue(settingsData),
+            "settingsData": encodeValue(savedSettings),
         }
 
     # Saved GPK speed profiles, cant deficiency arrays and kinematics so plots reopen instantly
@@ -294,6 +298,9 @@ class ProjectFileManager:
     # Vehicles, geometry limits and every other persisted setting replace the defaults wholesale
     def applyVehicleConfiguration(self, mainWindow, vehicleConfiguration):
         settingsData = decodeValue(vehicleConfiguration.get("settingsData", {}))
+        # Older versions saved the author's basemap key here, it must never be used by someone else
+        if isinstance(settingsData, dict):
+            settingsData.pop(basemap_key.LEGACY_SETTINGS_KEY, None)
         if settingsData:
             mainWindow.dataStorage["settingsData"] = settingsData
 

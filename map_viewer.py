@@ -1,6 +1,5 @@
 import io
 import json
-import os
 from urllib.parse import quote
 
 import folium
@@ -9,6 +8,7 @@ from folium.features import ColorLine
 import math
 from PySide6.QtCore import (QBuffer, QFile, QIODevice, QObject, Qt, QTimer, QUrl,
                             Signal, Slot)
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton,
                                QSlider, QWidget, QVBoxLayout)
 from PySide6.QtWebEngineCore import (QWebEnginePage, QWebEngineProfile,
@@ -19,6 +19,7 @@ import numpy as np
 import branca.colormap as bcm
 from branca.element import MacroElement, Template
 
+import basemap_key
 import icons
 from geometry_engine import SLEW_VISIBLE_THRESHOLD_MM
 from ribbon import SERIES_TOGGLE_PROPERTY
@@ -29,8 +30,9 @@ MAX_LOOKUP_POINTS = 2000
 # Maximum number of vertices drawn per line, a coloured line costs one svg path per segment
 MAX_RENDER_POINTS = 20000
 
-# Tile policies want the application named, and OpenRailwayMap refuses a bare browser agent
-MAP_TILE_USER_AGENT = "COYPU/1.0 (railway alignment design tool)"
+# Tile policies want the application named with a contact, and OpenRailwayMap refuses a bare
+# browser agent. It is the real application agent, the CARTO and OSM terms forbid a forged one
+MAP_TILE_USER_AGENT = "COYPU/1.0 (+https://github.com/surovskyjk/COYPU)"
 
 # Private scheme the rendered page is served over, so no size limited data url is involved
 MAP_PAGE_SCHEME = b"coypu"
@@ -75,11 +77,15 @@ BASEMAP_CHOICES = [
     ("cartodbDark", "mapCartoDark", "CartoDB Dark"),
 ]
 
-# Explicit public raster endpoints, folium's friendly names resolve to the watermarked hosts
+# Attribution wording the CARTO, OSM and OpenRailwayMap terms each ask for, linked as required
 CARTO_ATTRIBUTION = ('&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> '
-                     'contributors &copy; <a href="https://carto.com/attributions">CARTO</a>')
+                     'contributors, &copy; <a href="https://carto.com/attribution/">CARTO</a>')
 OSM_ATTRIBUTION = ('&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> '
                    'contributors')
+RAIL_OVERLAY_ATTRIBUTION = (
+    'Data &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, '
+    'Style: <a href="https://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA 2.0</a> '
+    '<a href="https://www.openrailwaymap.org/">OpenRailwayMap</a>')
 
 # Tile template, attribution and the deepest zoom the provider actually ships, per base map
 BASEMAP_TILE_SOURCES = {
@@ -90,7 +96,10 @@ BASEMAP_TILE_SOURCES = {
     "osm": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", OSM_ATTRIBUTION, 19),
 }
 
-# Base map used when a chosen one has no tile definition
+# CARTO stamps every tile requested without a key, so these are only offered once one is set
+CARTO_BASEMAPS = ("positron", "cartodbDark")
+
+# Base map used when a chosen one has no tile definition or needs a key that is missing
 FALLBACK_BASEMAP = "osm"
 
 # Zoom bounds of the viewport, deeper than any provider ships so slews stay inspectable
@@ -99,10 +108,6 @@ MAP_MIN_ZOOM = 3
 
 # Deepest zoom the OpenRailwayMap overlay renders natively
 RAIL_OVERLAY_NATIVE_ZOOM = 19
-
-# Optional user supplied basemap key, read from the settings first and the environment second
-BASEMAP_API_KEY_SETTING = "mapBasemapApiKey"
-BASEMAP_API_KEY_ENVIRONMENT = "COYPU_MAP_API_KEY"
 
 # Alignment rendering styles offered by the style selector
 DRAW_MODE_SINGLE = "single"
@@ -521,6 +526,8 @@ class MapControlsPanel(QFrame):
         panelLayout.addWidget(self.measureReadoutLabel)
 
         self.currentDrawMode = DRAW_MODE_SPEED
+        # Whether a CARTO key is set, without one the CARTO entries stay listed but unselectable
+        self.hasCartoKey = True
         self.updateTexts(self.lan)
 
     # Build one heading and remember it so a language change can retranslate it
@@ -569,13 +576,28 @@ class MapControlsPanel(QFrame):
         template = self.lan.get("mapMeasureTotal", "Total: {distance}")
         self.measureReadoutLabel.setText(template.format(distance=readoutText))
 
+    # Grey out the CARTO entries while no key is set, the tooltip says where to add one
+    def applyCartoAvailability(self):
+        disabledTip = self.lan.get("mapCartoKeyDisabledTip",
+                                   "Needs a CARTO API key, add one in Map Settings")
+        comboModel = self.baseMapCombo.model()
+        for itemIndex, (baseMapKey, _, _) in enumerate(BASEMAP_CHOICES):
+            if baseMapKey not in CARTO_BASEMAPS:
+                continue
+            comboItem = comboModel.item(itemIndex)
+            comboItem.setEnabled(self.hasCartoKey)
+            comboItem.setToolTip("" if self.hasCartoKey else disabledTip)
+
     # Adopt the state owned by the map widget without re-emitting signals
     def syncState(self, baseMap, drawMode, railEnabled, railOpacity, showStations,
-                  showElementDetails=True):
+                  showElementDetails=True, hasCartoKey=True):
         for controlWidget in (self.baseMapCombo, self.railOverlayButton,
                               self.alignmentStyleCombo, self.stationsButton,
                               self.detailsButton):
             controlWidget.blockSignals(True)
+
+        self.hasCartoKey = bool(hasCartoKey)
+        self.applyCartoAvailability()
 
         comboIndex = self.baseMapCombo.findData(baseMap)
         if comboIndex >= 0:
@@ -607,6 +629,7 @@ class MapControlsPanel(QFrame):
         self.baseMapCombo.blockSignals(True)
         for itemIndex, (baseMapKey, languageKey, fallbackName) in enumerate(BASEMAP_CHOICES):
             self.baseMapCombo.setItemText(itemIndex, self.lan.get(languageKey, fallbackName))
+        self.applyCartoAvailability()
         self.baseMapCombo.blockSignals(False)
 
         self.alignmentStyleCombo.blockSignals(True)
@@ -686,6 +709,14 @@ class MapPage(QWebEnginePage):
         # The level is an enum in PySide6, int() on it raises, so the name is what travels
         self.consoleMessageReceived.emit(level.name, message, lineNumber)
 
+    # A clicked web link, such as the tile attribution, opens in the system browser and the map stays
+    def acceptNavigationRequest(self, url, navigationType, isMainFrame):
+        isLinkClick = navigationType == QWebEnginePage.NavigationType.NavigationTypeLinkClicked
+        if isLinkClick and url.scheme() in ("http", "https"):
+            QDesktopServices.openUrl(url)
+            return False
+        return super().acceptNavigationRequest(url, navigationType, isMainFrame)
+
 
 class MapBridge(QObject):
     # Emitted with the chainage in kilometres reported by the page
@@ -740,8 +771,8 @@ class MapWidget(QWidget):
         self.wasDarkTheme = False
         self.lan = lan or {}
         self.themeTokens = None
-        # Only read for the optional basemap key, never written back
-        self.settingsData = {}
+        # CARTO key from the credential vault, held in memory only and never written to a project
+        self.cartoApiKey = basemap_key.loadKey()
         # Active unit system, km/h when true and m/s when false
         self.useKmh = False
         # Bounding box of everything drawn, the fallback target of the fit view control
@@ -781,6 +812,7 @@ class MapWidget(QWidget):
         self.controlsPanel.measureModeChanged.connect(self.setMeasureMode)
         self.controlsPanel.detailsToggled.connect(self.setElementDetailsVisible)
         self.controlsPanel.applyTheme(False)
+        self.syncControlsPanel()
 
         # The bridge lets the page report the chainage under the mouse back to Qt
         self.bridge = MapBridge(self)
@@ -798,6 +830,9 @@ class MapWidget(QWidget):
 
         # One handler serves every rendered page, so it is installed once per widget
         self.pageHandler = MapPageHandler(self)
+        # The default profile is off the record, so tiles live in a memory cache only. It honours
+        # the tile cache headers for the session as the OSM policy asks, and nothing stays on disk,
+        # which keeps within the CARTO limit on caching and on keeping content after use ends
         mapProfile = QWebEngineProfile.defaultProfile()
         mapProfile.installUrlSchemeHandler(MAP_PAGE_SCHEME, self.pageHandler)
         # Naming the application is what keeps the railway tiles from answering 403
@@ -876,7 +911,8 @@ class MapWidget(QWidget):
             return
         self.wasConsoleErrorReported = True
         template = self.lan.get("mapScriptFailed", "Map script error: {message}")
-        self.mapFailed.emit(template.format(message=message))
+        # A failed tile request can quote its URL, which must not put the key on screen
+        self.mapFailed.emit(template.format(message=basemap_key.redactKey(message)))
 
     # Keep the measure readout in the floating controls in step with the page
     def onMeasureDistanceReported(self, distanceMeters):
@@ -898,11 +934,34 @@ class MapWidget(QWidget):
         self.currentBaseMap = baseMap
         self.syncControlsPanel()
 
+        # Without a key the CARTO tiles come back watermarked, so the keyless fallback is shown
+        if self.effectiveBaseMap() != baseMap and baseMap in CARTO_BASEMAPS:
+            self.mapFailed.emit(self.lan.get(
+                "mapCartoNeedsKey",
+                "CARTO basemaps need a free API key, add it in Map Settings. "
+                "Showing OpenStreetMap."))
+
         # Swapping tiles in the live page keeps the camera exactly where the user left it
+        activeBaseMap = json.dumps(self.effectiveBaseMap())
         if self.runLayerScript(
-                f"if (window.coypuSetBasemap) {{ window.coypuSetBasemap({json.dumps(baseMap)}); }}"):
+                f"if (window.coypuSetBasemap) {{ window.coypuSetBasemap({activeBaseMap}); }}"):
             return
 
+        self.redraw()
+
+    # The base map actually drawn, a CARTO choice falls back to OpenStreetMap while no key is set
+    def effectiveBaseMap(self):
+        if self.currentBaseMap in CARTO_BASEMAPS and not self.cartoApiKey:
+            return FALLBACK_BASEMAP
+        return self.currentBaseMap
+
+    # Adopt a new CARTO key, the tile URLs are baked into the page so it is rebuilt
+    def setCartoApiKey(self, apiKey):
+        apiKey = str(apiKey or "").strip()
+        if apiKey == self.cartoApiKey:
+            return
+        self.cartoApiKey = apiKey
+        self.syncControlsPanel()
         self.redraw()
 
     # Enable or disable the OpenRailwayMap overlay and set its transparency
@@ -1052,10 +1111,6 @@ class MapWidget(QWidget):
     def setUnitSystem(self, useKmh):
         self.useKmh = bool(useKmh)
 
-    # Hand the widget the live settings so an optional basemap key can be picked up
-    def setSettingsData(self, settingsData):
-        self.settingsData = settingsData or {}
-
     # Store the scheduled stops so they can be placed along the alignment
     def setStations(self, stations):
         newStations = list(stations or [])
@@ -1082,9 +1137,10 @@ class MapWidget(QWidget):
 
     # Push the current state into the floating controls without emitting signals
     def syncControlsPanel(self):
-        self.controlsPanel.syncState(self.currentBaseMap, self.drawMode,
+        self.controlsPanel.syncState(self.effectiveBaseMap(), self.drawMode,
                                      self.railOverlayEnabled, self.railOverlayOpacity,
-                                     self.showStations, self.showElementDetails)
+                                     self.showStations, self.showElementDetails,
+                                     hasCartoKey=bool(self.cartoApiKey))
 
     # Keep the floating controls pinned to the top left corner of the view
     def resizeEvent(self, event):
@@ -1101,26 +1157,22 @@ class MapWidget(QWidget):
         self.redraw()
 
     # Restyle the floating controls when the application theme changes, and default
-    # to the dark basemap the first time the app switches into dark mode
+    # to the dark basemap the first time the app switches into dark mode, when a key allows it
     def applyTheme(self, isDark, tokens=None):
-        if isDark and not self.wasDarkTheme and self.currentBaseMap != "cartodbDark":
+        if (isDark and not self.wasDarkTheme and self.cartoApiKey
+                and self.currentBaseMap != "cartodbDark"):
             self.setBaseMap("cartodbDark")
         self.wasDarkTheme = isDark
         self.themeTokens = tokens
         self.controlsPanel.applyTheme(isDark, tokens)
 
-    # Optional tile key, never stored in source, taken from the project settings or the environment
-    def resolveBasemapApiKey(self):
-        settingsKey = (self.settingsData or {}).get(BASEMAP_API_KEY_SETTING, "")
-        return str(settingsKey or os.environ.get(BASEMAP_API_KEY_ENVIRONMENT, "")).strip()
-
-    # Tile template for the active base map, with an optional user key appended as a query parameter
+    # Tile template for a base map. The CARTO key goes to the CARTO hosts only, never to a third party
     def basemapTileUrl(self, baseMapKey):
         tileUrl, attribution, nativeZoom = BASEMAP_TILE_SOURCES.get(
             baseMapKey, BASEMAP_TILE_SOURCES[FALLBACK_BASEMAP])
-        apiKey = self.resolveBasemapApiKey()
-        if apiKey:
-            tileUrl = f"{tileUrl}{'&' if '?' in tileUrl else '?'}api_key={quote(apiKey, safe='')}"
+        if baseMapKey in CARTO_BASEMAPS and self.cartoApiKey:
+            separator = "&" if "?" in tileUrl else "?"
+            tileUrl = f"{tileUrl}{separator}key={quote(self.cartoApiKey, safe='')}"
         return tileUrl, attribution, nativeZoom
 
     # One layer object per base map, so switching provider is an addLayer and never a page rebuild
@@ -1138,7 +1190,7 @@ class MapWidget(QWidget):
                 show=isActive
             )
 
-        # Explicit endpoints, so no basemap ever falls back to a key gated host
+        # Explicit endpoints, so the key and attribution of each provider stay under our control
         tileUrl, attribution, nativeZoom = self.basemapTileUrl(baseMapKey)
         return folium.TileLayer(
             tiles=tileUrl,
@@ -1153,9 +1205,13 @@ class MapWidget(QWidget):
         )
 
     def addTiles(self, m):
-        # Every provider is emitted, only the active one is shown, so a switch stays in the page
+        # Every usable provider is emitted, only the active one is shown, so a switch stays in the
+        # page. A CARTO layer without a key would only ever serve watermarked tiles, so it is left out
+        activeBaseMap = self.effectiveBaseMap()
         for baseMapKey, _, _ in BASEMAP_CHOICES:
-            isActive = baseMapKey == self.currentBaseMap
+            if baseMapKey in CARTO_BASEMAPS and not self.cartoApiKey:
+                continue
+            isActive = baseMapKey == activeBaseMap
             layer = self.buildBasemapLayer(baseMapKey, isActive)
             layer.add_to(m)
             self.layerRegistry["basemaps"][baseMapKey] = layer.get_name()
@@ -1163,7 +1219,7 @@ class MapWidget(QWidget):
         # The railway overlay is independent of the chosen base map
         railOverlay = folium.TileLayer(
             tiles='https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png',
-            attr='Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> | Style: &copy; <a href="https://www.openrailwaymap.org/">OpenRailwayMap</a>',
+            attr=RAIL_OVERLAY_ATTRIBUTION,
             name='OpenRailwayMap',
             className='coypuRailOverlay',
             subdomains='abc',
@@ -1410,7 +1466,7 @@ class MapWidget(QWidget):
             lookupPoints=json.dumps(self.buildLookupPoints()),
             # Layer variables are emitted as bare identifiers, they are page globals and not strings
             layerRegistry=self.renderLayerRegistry(),
-            activeBasemap=json.dumps(self.currentBaseMap),
+            activeBasemap=json.dumps(self.effectiveBaseMap()),
             detailsEnabled=json.dumps(self.showElementDetails),
             tooltipLabels=json.dumps({
                 "slew": self.lan.get("mapSlewTooltip", "Slew"),

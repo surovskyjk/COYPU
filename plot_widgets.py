@@ -529,6 +529,9 @@ class CoypuPlotWidget(pg.GraphicsLayoutWidget):
     # Show or hide the station indicators across every plot
     def setStationMarkersVisible(self, isVisible):
         self.showStationMarkers = bool(isVisible)
+        # Every plot's menu shows the shared state, setChecked emits toggled and not triggered
+        for parts in self.plotMenus.values():
+            parts["stationAction"].setChecked(self.showStationMarkers)
         self.refreshStationMarkers()
 
     # Apply the active theme to the canvas, the axes and the crosshairs
@@ -917,11 +920,49 @@ class CoypuPlotWidget(pg.GraphicsLayoutWidget):
             symmetricYlim=bool(secondary),
         )
         window.applyTheme(self.isDark, self.tokens)
+        # The popup canvas starts empty, so the stations, stops and guides are handed over as well
+        self.copyOverlaysTo(plotKey, window.plotWidget, "main")
         window.show()
 
         # Keeping a reference prevents the window from being garbage collected
         self.detachedWindows.append(window)
         return window
+
+    # Reproduce the marker lines and captions of one plot on a plot of another canvas
+    def copyOverlaysTo(self, plotKey, targetWidget, targetKey):
+        plotItem = self.plotItems.get(plotKey)
+        targetPlot = targetWidget.plotItems.get(targetKey)
+        if plotItem is None or targetPlot is None:
+            return
+
+        # Stations travel as data, so the target draws them itself and its own toggle keeps working
+        targetWidget.setStationMarkersVisible(self.showStationMarkers)
+        targetWidget.setStations(self.stationList)
+
+        # The cursor items follow the mouse, the station markers were handed over just above
+        skippedItems = [self.plotCrosshairs.get(plotKey), self.readoutLabel]
+        skippedItems.extend(self.plotStationMarkers.get(plotKey, []))
+
+        for item in plotItem.items:
+            if not item.isVisible() or any(item is skipped for skipped in skippedItems):
+                continue
+            if isinstance(item, pg.InfiniteLine):
+                # Stop lines and threshold guides a dock drew itself, rebuilt with the same look
+                label = getattr(item, "label", None)
+                targetWidget.buildMarker(
+                    targetPlot, item.value(), item.angle, item.pen.color(),
+                    label.format if label is not None else "",
+                    label.color if label is not None else None,
+                    item.pen.style())
+            elif isinstance(item, pg.TextItem):
+                # Free captions such as the profile gradients
+                anchor = item.anchor
+                caption = pg.TextItem(item.toPlainText(), anchor=(anchor.x(), anchor.y()),
+                                      color=item.color)
+                caption.setPos(item.pos())
+                targetPlot.addItem(caption, ignoreBounds=True)
+
+        targetWidget.updateMarkerAnchors()
 
     # Refresh the context menu captions after a language change
     def retranslateMenus(self, lan):

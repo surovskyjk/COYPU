@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 import numpy as np
 import pyqtgraph as pg
 
+import basemap_key
 import plot_widgets
 
 import csv
@@ -154,13 +155,29 @@ class MapSettingsDialog(QDialog):
         if index >= 0: self.comboSpeedProfile.setCurrentIndex(index)
         formLayout.addRow(self.labelSpeedProfile, self.comboSpeedProfile)
         
-        # Optional and stored with the project, no key is ever compiled into the application
+        # Masked, kept in the credential vault by the caller, never in a project or in the source
         self.apiKeyInput = QLineEdit(str(basemapApiKey or ""))
+        self.apiKeyInput.setEchoMode(QLineEdit.EchoMode.Password)
         self.apiKeyInput.setToolTip(lan.get(
             "mapApiKeyTip",
-            "Only needed for a keyed tile provider, leave empty for the public endpoints"))
-        formLayout.addRow(QLabel(lan.get("mapApiKeyLabel", "Basemap API key (optional):")),
+            "Needed for the CARTO basemaps, leave empty to use OpenStreetMap"))
+        formLayout.addRow(QLabel(lan.get("mapApiKeyLabel", "CARTO API key:")),
                           self.apiKeyInput)
+
+        # Where a key comes from, either the author on request or a free one of the user's own
+        self.apiKeyHelp = QLabel(lan.get(
+            "mapApiKeyHelp",
+            "CARTO basemaps need an API key. You can ask the author of COYPU for one via GitHub "
+            "({authorLink}), or get your own free key at {cartoLink}. The key is stored encrypted "
+            "for your Windows account and is never saved in project files. Leave the field empty "
+            "to use OpenStreetMap.").format(
+                authorLink=self.linkHtml(basemap_key.AUTHOR_CONTACT_URL),
+                cartoLink=self.linkHtml(basemap_key.CARTO_KEY_SIGNUP_URL)))
+        self.apiKeyHelp.setWordWrap(True)
+        self.apiKeyHelp.setTextFormat(Qt.TextFormat.RichText)
+        self.apiKeyHelp.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.apiKeyHelp.setOpenExternalLinks(True)
+        formLayout.addRow(self.apiKeyHelp)
 
         self.comboDrawMode.currentTextChanged.connect(self.updateSpeedProfileVisibility)
         self.updateSpeedProfileVisibility()
@@ -178,6 +195,11 @@ class MapSettingsDialog(QDialog):
         isSpeedMode = self.comboDrawMode.currentData() == "speed"
         self.labelSpeedProfile.setVisible(isSpeedMode)
         self.comboSpeedProfile.setVisible(isSpeedMode)
+
+    # Clickable link showing the address without its scheme
+    def linkHtml(self, url):
+        caption = url.split("://", 1)[-1].rstrip("/")
+        return f'<a href="{url}">{caption}</a>'
 
     # Whatever the user typed into the optional key field, stripped
     def getBasemapApiKey(self):

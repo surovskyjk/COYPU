@@ -44,7 +44,7 @@ The following parameters can be adjusted in the Settings dialog:
 - `maxIterations` - maximum number of solver iterations
 - `designApproach` - norm approach used for limit lookup (standard / alternative)
 - EPSG code - coordinate reference system of the input LandXML file
-- Basemap API key - optional, only needed for a keyed tile provider; may also be supplied through the `COYPU_MAP_API_KEY` environment variable and is never stored in the source
+- CARTO API key - set in Map Settings, needed only for the CARTO basemaps, see [Map Basemaps and API Key](#map-basemaps-and-api-key)
 
 Alignment optimization parameters, set in the Alignment Optimization dialog:
 
@@ -54,6 +54,27 @@ Alignment optimization parameters, set in the Alignment Optimization dialog:
 - `isRMaxEnabled` / `rMaxM` - optional ceiling on radius maximization [m], off by default
 - `ratioCPercent` - mode 5 only, the share of the slew envelope given to the arc radius [%]
 - `modeLcl` / `modeLscsl` - optimization mode per element pattern
+
+---
+
+## Map Basemaps and API Key
+
+The map offers OpenStreetMap, the ČÚZK orthophoto and the two CARTO basemaps (Voyager and Dark). Since 23 September 2026 CARTO stamps every tile requested without an API key with an "API KEY REQUIRED" watermark, so the CARTO basemaps are only offered once a key is set. Without a key the map falls back to OpenStreetMap, which needs no key.
+
+Getting a key:
+
+- ask the author for one via GitHub (https://github.com/surovskyjk), the key is then sent privately, or
+- register your own free key at https://carto.com/basemaps/apikey/ (only an e-mail address is needed)
+
+Paste the key into Map Settings. It is kept in the operating system credential vault (Windows Credential Manager) for your user account, attached only to requests for CARTO tiles, and never written to project files, presets or logs. Projects saved by older versions that still carry a key have it removed on load. For development and scripted runs the key can also be supplied through the `COYPU_MAP_API_KEY` environment variable, which is read when the vault holds nothing.
+
+A key must never be committed to this repository or bundled into a build: anything shipped with a desktop application can be extracted from it, and public repositories are scanned for keys. If a key leaks, regenerate it at CARTO and paste the new one into Map Settings.
+
+Tile terms the map follows:
+
+- **CARTO** ([Basemaps Terms](https://carto.com/legal/basemap-terms/)): free up to 5 million tile requests a month for non-commercial use (personal, educational, academic, research) and 1 million for commercial use, counted per account across all its keys. The key holder is responsible for all usage on it. The credit "© OpenStreetMap contributors, © CARTO" stays visible on the map, and no tiles are cached on disk or through a server.
+- **OpenStreetMap** ([Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/)): the application identifies itself with its own User-Agent, shows "© OpenStreetMap contributors", honours the tile cache headers, and requests only the tiles in view, never in bulk or for offline use.
+- **OpenRailwayMap** overlay ([usage policy](https://wiki.openstreetmap.org/wiki/OpenRailwayMap/API)): credited as "Data © OpenStreetMap contributors, Style: CC-BY-SA 2.0 OpenRailwayMap"; commercial use requires your own tile server.
 
 ---
 
@@ -388,6 +409,7 @@ The Batch page runs many track variants unattended and compares them side by sid
 - `vehicle_engine.py` - train kinematics simulation
 - `readfile.py` - LandXML and XML TTP parsers, coordinate transformations
 - `map_viewer.py` - interactive Folium map widget with floating map controls
+- `basemap_key.py` - CARTO basemap key storage in the operating system credential vault
 - `plot_widgets.py` - shared pyqtgraph base widget, context menus and navigation toolbar
 - `graphs_dock.py` - linked track geometry and speed profile plots
 - `profile_dock.py` - longitudinal profile plot with gradient annotations
