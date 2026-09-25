@@ -224,17 +224,19 @@ transitions" means: as the radius grows the transition lengthens proportionally,
 cant ramp gradient the imported design used. Solving the radius first and the spirals afterwards
 does not work — the radius search alone consumes the whole `d_max` envelope, and every longer
 clothoid then increases `ΔR` and breaches it, which is why a sequential formulation collapses onto
-mode 3. When the tangent budget or `L_k,max` caps a transition, it freezes at its cap and the
-remaining envelope goes to the radius alone.
+mode 3. When the tangent budget or `L_k,max` caps either transition, both freeze at that common
+scale and the remaining envelope goes to the radius alone.
 
 **Mode 2** keeps `R₀` and spends the whole envelope on the clothoids, raising the permissible speed
-through the cant deficiency change rate rather than through curvature.
+through the cant deficiency change rate rather than through curvature. Both transitions grow off one
+parameter, the length of the longer one, with the shorter following at the imported ratio.
 
 **Mode 3** is the only mode offered for L-C-L, and the only one that changes nothing but `R`.
 
 **Mode 4** reduces the radius while lengthening the transitions, both from one parameter
-`s`: `R = R₀ − s` and `L = sqrt(24 R (ΔR₀ + 2s))`. It trades curvature for a gentler cant ramp,
-which helps where the ramp gradient rather than the radius is what limits the speed.
+`s`: `R = R₀ − s` and `L = sqrt(24 R (ΔR₀ + 2s))` for the longer transition, the shorter one
+following at the imported ratio. It trades curvature for a gentler cant ramp, which helps where the
+ramp gradient rather than the radius is what limits the speed.
 
 **Mode 5** lets the designer split the envelope instead of letting one mechanism take all of it.
 A ratio `C : S` (default 50 : 50, set in the optimization dialog) partitions `d_max` into an arc
@@ -242,17 +244,20 @@ share `d_C = (C/100) · d_max` and a transition share `d_S = (S/100) · d_max`, 
 solved independently:
 
 1. The radius is maximised against `d_C` alone, with the clothoids held at `L₀`.
-2. At that new radius, the target tangent offset is raised to `m_new = ΔR(R_new, L₀) + d_S` and both
-   transitions are lengthened to the `L` that produces it, seeded from `L = sqrt(24 · R_new · m_new)`
-   and refined against the exact `ΔR` series.
+2. At that new radius, the longer transition's tangent offset is raised to
+   `m_new = ΔR(R_new, L₀) + d_S` and it is lengthened to `L = sqrt(24 · R_new · m_new)`; the shorter
+   transition follows at the imported ratio.
 
-Both transitions grow off that one offset increment, so a symmetric curve stays symmetric — unlike
-mode 2, whose entry-then-exit search lets the first clothoid consume the envelope and leaves the
-second at its imported length. The ratio only decides *where the search starts*: the accepted
+The ratio only decides *where the search starts*: the accepted
 candidate is still measured against the full `d_max` on the sampled geometry, and when the two
 stages combined would overshoot it the transitions are backed off rather than the extension being
 abandoned. Setting the ratio to 100 : 0 reproduces mode 3 exactly; 0 : 100 keeps `R₀` and spends
 everything on the transitions.
+
+**Symmetry.** Every mode keeps the imported `L_entry : L_exit`: the transitions are lengthened by one
+common scale factor, and any cap that binds on one side stops both. A symmetric curve therefore stays
+symmetric and an asymmetric one keeps its proportions. An L-C-L group is symmetric by construction,
+its enlarged arc is centred on the bisector of the fixed PI.
 
 ### Element pattern handling
 
@@ -285,6 +290,8 @@ A group also needs a real straight on both sides (`optSkipNoTangent`).
 - **`L_k,max`** — an upper bound on an optimized transition length, so a curve cannot be given a
   disproportionately long clothoid just because the envelope still allows one. It clamps the search
   ceiling and every candidate, and never shortens a transition that was already longer on import.
+  It caps the pair: once either transition reaches it, neither grows further, so a transition
+  already longer than `L_k,max` on import keeps both at their imported lengths.
 - **`R_max`** — a ceiling on radius maximization (100 to 99000 m). When it is switched off the
   upper bound of that range still applies as a sanity bound: on a near straight kink `sec(Δ/2)` is
   barely above one, so the apex offset hardly moves with the radius and an unbounded search runs
@@ -300,7 +307,8 @@ A group also needs a real straight on both sides (`optSkipNoTangent`).
   to leave each bounding straight at least `L_min`, or at least what it already had when it was
   shorter than `L_min` to begin with. The remaining length is re-measured from the straight's own
   endpoints after each group, so two neighbouring curves cannot each spend the same metres, and a
-  straight can never be consumed past its own start.
+  straight can never be consumed past its own start. Whichever straight runs out first limits both
+  transitions, so the imported ratio survives a short tangent on one side.
 
 #### Minimum length relaxation
 

@@ -2125,25 +2125,32 @@ class AlignmentOptimizer:
             return {"feasible": False, "reason": self.exhaustionReason()}
         return {"feasible": True, "Rnew": Rnew, "Lentry": L0entry, "Lexit": L0exit}
 
-    # Largest spiral length allowed by the shared tangent budget, the arc floor and L_k,max
-    def spiralLengthCeiling(self, frame, radius, ownLength, otherLength, budget):
-        byBudget = ownLength + self.resolveSharedLine(budget, np.inf, self.lMinM)
-        byArc = self.maximumSpiralSumForArcLength(frame, radius, self.effectiveArcFloorM()) - otherLength
-        return max(ownLength, min(byBudget, byArc, self.lkMaxM))
+    # Largest common scale both transitions may take, from L_k,max and the shared tangent budget.
+    # Clamping each side on its own let the other keep growing, so a capped pair lost the
+    # imported L_entry : L_exit. The tighter side now stops both, and a transition already past
+    # L_k,max on import freezes the pair rather than being shortened.
+    def spiralScaleCeiling(self, L0entry, L0exit, entryBudget, exitBudget):
+        ceiling = np.inf
+        for length, budget in ((L0entry, entryBudget), (L0exit, exitBudget)):
+            if length <= 0:
+                continue
+            ceiling = min(ceiling, self.lkMaxM / length,
+                          1.0 + self.resolveSharedLine(budget, np.inf, self.lMinM) / length)
+        return max(1.0, ceiling) if np.isfinite(ceiling) else 1.0
+
+    # Both transitions at one common scale of their imported lengths, so their ratio is kept
+    def scaledSpiralPair(self, L0entry, L0exit, scale, entryBudget, exitBudget):
+        scale = min(max(scale, 1.0), self.spiralScaleCeiling(L0entry, L0exit, entryBudget, exitBudget))
+        return L0entry * scale, L0exit * scale
+
+    # The longer imported transition drives each mode's length formula, the shorter one follows it
+    def referenceSpiralLength(self, L0entry, L0exit):
+        return max(L0entry, L0exit)
 
     # Transition lengths that keep the spiral angle L/(2R) of the imported curve at a new radius
     def coupledSpiralLengths(self, R0, L0entry, L0exit, radius, entryBudget, exitBudget):
         scale = radius / R0 if R0 > 0 else 1.0
-        Lentry, Lexit = L0entry, L0exit
-
-        if L0entry > 0:
-            Lentry = min(max(L0entry * scale, L0entry), self.lkMaxM)
-            Lentry = L0entry + self.resolveSharedLine(entryBudget, Lentry - L0entry, self.lMinM)
-        if L0exit > 0:
-            Lexit = min(max(L0exit * scale, L0exit), self.lkMaxM)
-            Lexit = L0exit + self.resolveSharedLine(exitBudget, Lexit - L0exit, self.lMinM)
-
-        return Lentry, Lexit
+        return self.scaledSpiralPair(L0entry, L0exit, scale, entryBudget, exitBudget)
     def solveShiftAndExtend(self, frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget):
         # Solving the radius first would spend the whole envelope before the clothoids were looked at,
         # which is why this mode used to collapse onto mode 3. Radius and transitions therefore grow
@@ -2187,39 +2194,34 @@ class AlignmentOptimizer:
         if L0entry <= 0 or L0exit <= 0:
             return {"feasible": False, "reason": "optSkipNoSpirals"}
 
-        Lentry, Lexit = L0entry, L0exit
+        # Extending the entry first and the exit second let the entry take the whole envelope, so
+        # even a symmetric curve came out lopsided. Both now grow off the longer transition in one
+        # search, the shorter one following at the imported ratio.
+        L0ref = self.referenceSpiralLength(L0entry, L0exit)
+        arcScaleCeiling = (self.maximumSpiralSumForArcLength(frame, R0, self.effectiveArcFloorM())
+                           / (L0entry + L0exit))
+        refCeiling = L0ref * max(1.0, min(arcScaleCeiling,
+                                          self.spiralScaleCeiling(L0entry, L0exit, entryBudget, exitBudget)))
 
-        def isFeasibleEntry(L):
-            if L > self.lkMaxM:
+        def lengthsAt(Lref):
+            scale = Lref / L0ref
+            return L0entry * scale, L0exit * scale
+
+        def isFeasible(Lref):
+            if Lref > refCeiling + 1e-9:
                 return False
-            if not self.isArcLengthAcceptable(frame, R0, L, Lexit):
+            Lentry, Lexit = lengthsAt(Lref)
+            if not self.isArcLengthAcceptable(frame, R0, Lentry, Lexit):
                 return False
-            if self.resolveSharedLine(entryBudget, L - L0entry, self.lMinM) < L - L0entry - 1e-6:
-                return False
-            geometry = self.buildCandidateGeometry(frame, R0, L, Lexit)
+            geometry = self.buildCandidateGeometry(frame, R0, Lentry, Lexit)
             if geometry is None:
                 return False
-            if not self.isCandidateSupported(frame, R0, L, Lexit, geometry):
+            if not self.isCandidateSupported(frame, R0, Lentry, Lexit, geometry):
                 return False
             return self.evaluateSlew(baselineAxis, geometry["samplePoints"]) <= self.dMaxM
-        ceiling = self.spiralLengthCeiling(frame, R0, L0entry, Lexit, entryBudget)
-        Lentry, _ = self.refineWithinBracket(isFeasibleEntry, L0entry, ceiling, max(1.0, L0entry*0.2))
 
-        def isFeasibleExit(L):
-            if L > self.lkMaxM:
-                return False
-            if not self.isArcLengthAcceptable(frame, R0, Lentry, L):
-                return False
-            if self.resolveSharedLine(exitBudget, L - L0exit, self.lMinM) < L - L0exit - 1e-6:
-                return False
-            geometry = self.buildCandidateGeometry(frame, R0, Lentry, L)
-            if geometry is None:
-                return False
-            if not self.isCandidateSupported(frame, R0, Lentry, L, geometry):
-                return False
-            return self.evaluateSlew(baselineAxis, geometry["samplePoints"]) <= self.dMaxM
-        ceiling = self.spiralLengthCeiling(frame, R0, L0exit, Lentry, exitBudget)
-        Lexit, _ = self.refineWithinBracket(isFeasibleExit, L0exit, ceiling, max(1.0, L0exit*0.2))
+        Lref, _ = self.refineWithinBracket(isFeasible, L0ref, refCeiling, max(1.0, L0ref*0.2))
+        Lentry, Lexit = lengthsAt(Lref)
 
         if Lentry - L0entry < 0.01 and Lexit - L0exit < 0.01:
             return {"feasible": False, "reason": self.exhaustionReason()}
@@ -2229,18 +2231,17 @@ class AlignmentOptimizer:
             return {"feasible": False, "reason": "optSkipNoSpirals"}
 
         Rfloor = max(60.0, 0.5 * R0)
-        _, deltaR0entry, _ = self.clothoidShiftAndFoot(L0entry, R0)
-        _, deltaR0exit, _ = self.clothoidShiftAndFoot(L0exit, R0)
+        L0ref = self.referenceSpiralLength(L0entry, L0exit)
+        _, deltaR0ref, _ = self.clothoidShiftAndFoot(L0ref, R0)
 
         # Bracket bound only, the strict slew check below is what actually enforces d_max
         def candidateAt(s):
             Rnew = max(Rfloor, R0 - s)
-            Lentry = float(np.sqrt(max(0.0, 24.0*Rnew*(deltaR0entry + 2.0*s))))
-            Lexit = float(np.sqrt(max(0.0, 24.0*Rnew*(deltaR0exit + 2.0*s))))
-            Lentry = min(Lentry, L0entry + self.resolveSharedLine(entryBudget, Lentry - L0entry, self.lMinM))
-            Lexit = min(Lexit, L0exit + self.resolveSharedLine(exitBudget, Lexit - L0exit, self.lMinM))
-            # A transition never grows past the configured ceiling, whatever the envelope still allows
-            return Rnew, min(Lentry, max(L0entry, self.lkMaxM)), min(Lexit, max(L0exit, self.lkMaxM))
+            # Adding 2s to each shift separately drew the pair towards 1 : 1, so only the longer
+            # transition follows the shift formula and the shorter one keeps the imported ratio
+            Lref = float(np.sqrt(max(0.0, 24.0*Rnew*(deltaR0ref + 2.0*s))))
+            Lentry, Lexit = self.scaledSpiralPair(L0entry, L0exit, Lref / L0ref, entryBudget, exitBudget)
+            return Rnew, Lentry, Lexit
 
         def isFeasible(s):
             Rnew, Lentry, Lexit = candidateAt(s)
@@ -2304,18 +2305,14 @@ class AlignmentOptimizer:
                 Rnew, _ = self.refineWithinBracket(gate, R0, seed, max(0.05, (seed - R0) * 0.05))
 
         # Step two spends the remaining share on the transitions, independently of what step one used
-        _, deltaREntry, _ = self.clothoidShiftAndFoot(L0entry, Rnew)
-        _, deltaRExit, _ = self.clothoidShiftAndFoot(L0exit, Rnew)
+        L0ref = self.referenceSpiralLength(L0entry, L0exit)
+        _, deltaRRef, _ = self.clothoidShiftAndFoot(L0ref, Rnew)
 
-        # Both transitions grow off one tangent offset increment, so a symmetric curve stays symmetric
+        # The longer transition takes the tangent offset increment and the shorter one follows at
+        # the imported ratio. Giving each the same increment drew an asymmetric pair towards 1 : 1.
         def lengthsForShift(shiftM):
-            entryLength = max(L0entry, self.spiralLengthForShift(Rnew, deltaREntry + shiftM))
-            entryLength = min(entryLength, self.lkMaxM)
-            entryLength = L0entry + self.resolveSharedLine(entryBudget, entryLength - L0entry, self.lMinM)
-            exitLength = max(L0exit, self.spiralLengthForShift(Rnew, deltaRExit + shiftM))
-            exitLength = min(exitLength, self.lkMaxM)
-            exitLength = L0exit + self.resolveSharedLine(exitBudget, exitLength - L0exit, self.lMinM)
-            return entryLength, exitLength
+            Lref = self.spiralLengthForShift(Rnew, deltaRRef + shiftM)
+            return self.scaledSpiralPair(L0entry, L0exit, Lref / L0ref, entryBudget, exitBudget)
 
         # The envelope is the hard gate here, the ratio only steered where the search started
         def isShiftFeasible(shiftM):
