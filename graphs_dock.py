@@ -262,8 +262,8 @@ class PerformanceGraphsWidget(CoypuPlotWidget):
         self.slewThresholdM = dMaxM
 
         # Splitting on sign keeps the inward and outward halves individually coloured
-        inwardValues = np.where(self.slewOffsetMm >= 0.0, self.slewOffsetMm, np.nan)
-        outwardValues = np.where(self.slewOffsetMm <= 0.0, self.slewOffsetMm, np.nan)
+        inwardValues = self.slewSideValues(isInward=True)
+        outwardValues = self.slewSideValues(isInward=False)
 
         self.setSeriesData("slew", "slewPositive", self.slewStationKm, inwardValues,
                            name=self.lan.get("slewInward", "Inward slew"))
@@ -272,6 +272,17 @@ class PerformanceGraphsWidget(CoypuPlotWidget):
 
         self.buildSlewGuides(dMaxM)
         self.applySlewRange(dMaxM)
+
+    # Offsets of one side of the slew profile. Each side is masked to its own sign, so a
+    # profile crossing zero between two samples used to leave a gap in both halves. Extending
+    # each side by a single sample across the crossing closes the line without moving a value.
+    def slewSideValues(self, isInward):
+        onSide = self.slewOffsetMm >= 0.0 if isInward else self.slewOffsetMm <= 0.0
+        keep = onSide.copy()
+        if keep.size > 1:
+            keep[:-1] |= onSide[1:]
+            keep[1:] |= onSide[:-1]
+        return np.where(keep, self.slewOffsetMm, np.nan)
 
     # Zero line plus the two configured d_max envelope lines
     def buildSlewGuides(self, dMaxM):

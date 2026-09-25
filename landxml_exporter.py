@@ -408,7 +408,7 @@ class LandXmlExporter:
             fallbackSpeed = float((self.settingsData.get("vInit") or [0])[0])
             return np.full(len(stationsKm), fallbackSpeed, dtype=float)
 
-        order = np.argsort(profileStations[:sampleCount])
+        order = np.argsort(profileStations[:sampleCount], kind="stable")
         return np.interp(np.asarray(stationsKm, dtype=float),
                          profileStations[:sampleCount][order], profileSpeeds[:sampleCount][order])
 

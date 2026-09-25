@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 import geometry_engine
 import readfile
+import simulation_runner
 import vehicle_engine
 
 # Display only arrays rebuilt from the optimized elements, never worth deepcopying into the worker
@@ -52,7 +53,9 @@ def evaluateElementSpeeds(dataStorage, landXml):
     try:
         # Design mode only, measured cant describes the imported axis and not a displaced one
         geometry_engine.GeometryCalculator(evaluationStorage).runCalculationLoop()
-    except (KeyError, IndexError, ValueError, ZeroDivisionError):
+    except (KeyError, IndexError, TypeError, ValueError, ZeroDivisionError):
+        # A failure here only costs the two impact columns, but letting it escape would abort
+        # the whole refresh from inside a Qt slot
         return None
 
     profileSuffix = resolveProfileSuffix(dataStorage.get("defaultProfile", "I150"))
@@ -106,6 +109,10 @@ def promoteOptimizedGeometry(workerLandXml):
         newKey = baseKey + "New"
         if newKey in workerLandXml:
             workerLandXml[baseKey] = workerLandXml[newKey]
+    # Measured cant and the gradient profile were surveyed against the imported chainage, so
+    # they move with it. Without this the as built loop interpolates baseline stations onto a
+    # re-chained axis and the vertical profile is read at the wrong place.
+    geometry_engine.projectChainageArrays(workerLandXml)
 
 
 # Collect every engine output the main window mirrors into its own New suffixed keys
@@ -151,6 +158,11 @@ def runOptimizedPipeline(workerStorage, config, calculationMode, epsgInput, prog
     payload["alignmentCoordinatesNew"] = optimizedElements.get("alignmentCoordinates", [])
     payload["denseAlignmentNew"] = optimizedElements.get("denseAlignment", [])
     payload["radiusNew"] = workerLandXml.get("radiusNew")
+    # The per element coordinate arrays describe the elements themselves. Only the stations and
+    # curvature used to be handed back, so the export kept writing the imported coordinates.
+    payload["elementArraysNew"] = {key: optimizedElements[key]
+                                   for key in geometry_engine.OPTIMIZER_INPUT_KEYS
+                                   if key in optimizedElements}
     for geometryKey in PROMOTED_GEOMETRY_KEYS:
         payload[geometryKey + "New"] = workerLandXml.get(geometryKey + "New")
     for chainageKey in CHAINAGE_MAP_KEYS:
@@ -174,6 +186,8 @@ def runOptimizedPipeline(workerStorage, config, calculationMode, epsgInput, prog
     vehicleCalculator = vehicle_engine.VehicleCalculator(workerStorage)
     vehicleCalculator.calculateKinematics()
     vehicleCalculator.speedLimitsToTime()
+    simulation_runner.dropUncertifiedVehicles(
+        workerStorage, resolveProfileSuffix(workerStorage.get("defaultProfile", "I150")))
 
     summary["timingMs"]["speedEvaluationMs"] = (time.perf_counter() - speedStarted) * 1000.0
     summary["timingMs"]["totalMs"] = (time.perf_counter() - pipelineStarted) * 1000.0

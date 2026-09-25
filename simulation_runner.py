@@ -57,6 +57,19 @@ def buildSimulationStorage(dataStorage, projectedTrainStops):
     return workerStorage
 
 
+# Drop the trajectory of every vehicle the given tier is not certified for. The tier ceiling is
+# a vehicle certification limit rather than a preference, so an uncertified train must contribute
+# no run at all instead of a plausible looking one. collectProfileResults already does this for
+# the multi profile pipeline; the batch and optimized pipelines call the engines directly.
+def dropUncertifiedVehicles(storage, profileKey):
+    for vehicleIndex, vehicleSettings in enumerate(profile_state.vehicleSettingsList(storage)):
+        if profile_state.isProfilePermitted(profileKey, vehicleSettings):
+            continue
+        for resultKey in PROFILE_RESULT_KEYS:
+            storage.pop(f"{resultKey}_{vehicleIndex}", None)
+        storage[f"kinematicsWarning_{vehicleIndex}"] = WARNING_NOT_CERTIFIED
+
+
 # Tiers worth evaluating, an absent array would silently fall back to the vehicle's own top speed
 def evaluableProfileKeys(dataStorage, vehicles):
     return [profileKey for profileKey in profile_state.PROFILE_KEYS

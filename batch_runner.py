@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, QThread, QMutex, QMutexLocker, Signal
 import batch_config
 import batch_metrics
 import geometry_engine
+import simulation_runner
 import vehicle_engine
 
 # LandXML keys the two engines actually read, everything else (coordinates, key points) is dead weight per variant
@@ -75,11 +76,15 @@ def runSingleVariant(leanBaseStorage, spec):
         scenario = spec.get("optimizationScenario")
         if scenario:
             variantLxml = variantStorage["LandXML"]
-            geometry_engine.AlignmentOptimizer(variantLxml, scenario).run()
+            _, optimizedElements = geometry_engine.AlignmentOptimizer(variantLxml, scenario).run()
             for baseKey in ("stationHorizontal", "geometryType", "curvature", "curvatureSign"):
                 newKey = baseKey + "New"
                 if newKey in variantLxml:
                     variantLxml[baseKey] = variantLxml[newKey]
+            # The element dict used to be discarded, so a loaded variant drew its map from the
+            # imported coordinates while every station around them had already moved
+            geometry_engine.promoteOptimizedElements(variantLxml, optimizedElements)
+            geometry_engine.projectChainageArrays(variantLxml)
 
         geometryCalc = geometry_engine.GeometryCalculator(variantStorage)
         if spec.get("calculationMode") == "asBuilt":
@@ -91,6 +96,8 @@ def runSingleVariant(leanBaseStorage, spec):
             vehicleCalc = vehicle_engine.VehicleCalculator(variantStorage)
             vehicleCalc.calculateKinematics()
             vehicleCalc.speedLimitsToTime()
+            simulation_runner.dropUncertifiedVehicles(
+                variantStorage, resolveProfileSuffix(spec.get("designProfile")))
 
         profileSuffix = resolveProfileSuffix(spec.get("designProfile"))
         metrics = batch_metrics.computeVariantMetrics(variantStorage, vehicleIndex=0, designProfileSuffix=profileSuffix)

@@ -99,7 +99,11 @@ Scheduled stops can be imported and exported via CSV with columns: station [km],
 
 ## Geometry Calculation
 
-The geometry engine uses an iterative convergence loop that starts from `vInit` and reduces the trial speed in discrete steps until the computed permissible speed matches the trial speed.
+The geometry engine uses an iterative convergence loop that starts from `vInit` and reduces the trial speed by one `iterationStep` per pass until the computed permissible speed matches the trial speed.
+
+The descent moves one grid step at a time on purpose. The permissible speed is *increasing* in the trial speed, because the cant D is designed for that trial speed, so the loop is looking for the largest self-consistent speed and jumping straight to the computed one would skip past it.
+
+`maxIterations` is therefore a floor rather than a cap: the engine raises it to whatever the distance from `vInit` down to the answer actually needs, so the result no longer depends on the budget being generous. The descent is additionally bounded by a hard iteration ceiling and a wall clock budget; if either is reached the profile is marked as not converged (`converged_<profile>` in the LandXML dictionary) and the GUI says so, rather than publishing a trial speed as though it were a design.
 
 Within each iteration:
 
@@ -115,6 +119,8 @@ Two calculation modes are available:
 - As-built mode (`runCalculationLoopI`) - uses the measured cant from the LandXML file directly; derives I and permissible speed for all four speed profiles (V100, V130, V150, VK)
 
 After convergence, D and I values are rounded and the final speed is verified against the D+I formula.
+
+The cant deficiency keeps its sign. A negative value is cant *excess*, meaning D sits above the equilibrium cant for the permissible speed, which is the opposite of a deficiency: it is reported as negative, it is not credited as speed headroom, and it does not load the cant deficiency limit.
 
 ---
 
@@ -235,10 +241,17 @@ Groups are maximal runs of non-straight elements between two straights.
   project or batch preset asking for a spiral mode is skipped with `optSkipNoSpirals`.
 - **L-S-C-S-L** — clothoid, arc, clothoid. All four modes apply. Both spirals must be genuine
   clothoids (one end at infinite radius, length above 0.5 m) and share the arc's turn direction.
-- **Reverse compound (S-curve)** — `S-C-S-S-C-S` with opposite turn directions. C1 continuity at the
-  inflection is validated, a virtual fixed tangent is synthesised there, and each half is then solved
-  as an L-S-C-S-L with extension disabled on the shared side.
+- **Reverse compound (S-curve)** — `S-C-S-S-C-S` with opposite turn directions. **Never optimized.**
+  A reverse curve is a different geometry problem: its two halves share an inflection point that is
+  not fixed by either bounding straight, so solving them independently moves each half's tangent
+  point along the shared tangent on its own and leaves a gap of a metre or more at the inflection.
+  The pattern is recognised only so the report can name it, and the group is skipped with
+  `optSkipReverseCurve` and left exactly as imported.
 - Anything else is reported as `optSkipCompound` or `optSkipNotClothoid` and left untouched.
+
+Only `L-C-L` and `L-S-C-S-L` are ever reshaped. Every other pattern keeps the geometry it was
+imported with; a skipped group's radius, centre and transition lengths are preserved exactly,
+and only its chainage follows the corridor when an upstream group changes length.
 
 A group also needs a real straight on both sides (`optSkipNoTangent`).
 
@@ -251,16 +264,22 @@ A group also needs a real straight on both sides (`optSkipNoTangent`).
 - **`L_k,max`** — an upper bound on an optimized transition length, so a curve cannot be given a
   disproportionately long clothoid just because the envelope still allows one. It clamps the search
   ceiling and every candidate, and never shortens a transition that was already longer on import.
-- **`R_max`** — an optional ceiling on radius maximization (100 to 99000 m, off by default), for the
+- **`R_max`** — a ceiling on radius maximization (100 to 99000 m). When it is switched off the
+  upper bound of that range still applies as a sanity bound: on a near straight kink `sec(Δ/2)` is
+  barely above one, so the apex offset hardly moves with the radius and an unbounded search runs
+  out to implausible values. A group stopped by the ceiling is flagged in the summary. It is for the
   modes that grow the radius: 1, 3 and 5. It is enforced as a feasibility gate rather than a
   post-hoc clamp — a candidate above the ceiling is simply infeasible — so the bisection converges
   onto `R_max` itself and the matching inward shift `d ≤ d_max` falls out of the same search. Mode 2
   leaves the radius alone and mode 4 shrinks it, so neither is affected. When the ceiling binds
   before the envelope does, the group still succeeds and its reported slew sits below `d_max`.
-- **Shared tangent budget** — a straight between two curves is consumed by both. The rule is
-  *`L_min`-or-zero*: a straight may be consumed entirely, or it must retain at least `L_min`. The
-  remaining length is tracked per straight across the whole corridor, so two neighbouring curves
-  cannot each spend the same metres.
+- **Shared tangent budget** — a straight between two curves is consumed by both, by a transition
+  growing into it and by a tangent point migrating along it as the radius grows (roughly
+  `ΔR·tan(Δ/2)` per end). Both are charged and both are gated: every candidate, in every mode, has
+  to leave each bounding straight at least `L_min`, or at least what it already had when it was
+  shorter than `L_min` to begin with. The remaining length is re-measured from the straight's own
+  endpoints after each group, so two neighbouring curves cannot each spend the same metres, and a
+  straight can never be consumed past its own start.
 
 #### Minimum length relaxation
 

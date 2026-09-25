@@ -1,6 +1,18 @@
 import numpy as np
 from collections import deque
 
+# Station keys of the geometry derived design profiles. A zero in one of these means the cant
+# design found no permissible speed there, which is an impassable section rather than a stop.
+DESIGN_PROFILE_STATION_KEYS = ("stationSpeed100", "stationSpeed130", "stationSpeed150", "stationSpeedK")
+
+# Floor on the braking rate, so a steep falling gradient cannot cancel the brakes entirely
+# and drive the backward pass to a standstill, in m/s^2
+MINIMUM_BRAKING_DECEL_MS2 = 0.05
+
+# Recorded against a vehicle whose selected design profile drops to zero somewhere on the run
+WARNING_ZERO_SPEED_SECTION = "zeroSpeedSection"
+
+
 # Per vehicle kinematics arrays calculateKinematics writes, read by every plot, report and exporter
 KINEMATICS_RESULT_KEYS = ("kinematicsStationM", "kinematicsSpeedM", "kinematicsTimeS",
                           "kinematicsAcceleration", "kinematicsForceTractionKN",
@@ -51,7 +63,7 @@ class VehicleCalculator:
                     speedLimit = np.copy(self.data.get(speedProfile[1], []))
                 
                 if len(stationSpeedLimit) > 0 and len(speedLimit) == len(stationSpeedLimit):
-                    sort_idx = np.argsort(stationSpeedLimit)
+                    sort_idx = np.argsort(stationSpeedLimit, kind="stable")
                     stationSpeedLimit = stationSpeedLimit[sort_idx]
                     speedLimit = speedLimit[sort_idx]
 
@@ -74,9 +86,14 @@ class VehicleCalculator:
             speedLimitM = speedLimit / 3.6
             ds = np.abs(np.diff(stationSpeedLimit))
 
+            # Limits are post-step: sample k governs the span that follows it in ascending
+            # chainage. A reversed run flips both arrays, so the span between samples k and k+1
+            # is then governed by the limit at k+1 and the profile was one segment out.
+            governingSpeedM = speedLimitM[1:] if run_reversed else speedLimitM[:-1]
+
             # Speed limit 0 check to prevent division by zero
             with np.errstate(divide='ignore', invalid='ignore'):
-                dt = np.where(speedLimitM[:-1] > 0, ds / speedLimitM[:-1], 0)
+                dt = np.where(governingSpeedM > 0, ds / governingSpeedM, 0)
 
             t = np.concatenate(([0], np.cumsum(dt)))
 
@@ -150,6 +167,16 @@ class VehicleCalculator:
                 slopeArr[i] = self.getSlopeAt(stationKm)
                 curvArr[i] = self.getCurvatureAt(stationKm)
 
+            # A scheduled stop is a zero the timetable asked for; a zero in a design profile is
+            # the cant design reporting that no speed is permissible there. Simulating the latter
+            # used to add a station dwell and then crawl the whole section at the 0.5 m/s floor,
+            # turning a 124 s run into 696 s with nothing said about it.
+            speedProfile = v_data.get("speedLimitPlot", ["stationSpeed150", "speedLimits150"])
+            if (speedProfile and speedProfile[0] in DESIGN_PROFILE_STATION_KEYS
+                    and np.any(vLimitMps_raw <= 0.0)):
+                self.data[f"kinematicsWarning_{v_idx}"] = WARNING_ZERO_SPEED_SECTION
+                continue
+
             if run_reversed:
                 slopeArr = -slopeArr
 
@@ -201,8 +228,11 @@ class VehicleCalculator:
                 forceRes = self.getVehicleResistance(vNextKmh)
                 forceTrack = self.getTrackResistance(slopeArr[i], curvArr[i])
                 
+                # Brakes and the natural resistances act together. Taking the larger of the two
+                # credited the brakes with nothing at all on a rising gradient, and ignored the
+                # gradient entirely on a falling one. forceTrack is signed, so this is a sum.
                 aNat = (forceRes + forceTrack) / self.effectiveMass
-                aDecel = max(self.trainBrakeDecel, aNat)
+                aDecel = max(self.trainBrakeDecel + aNat, MINIMUM_BRAKING_DECEL_MS2)
                 
                 # Calculate required entry speed solving backwards
                 vNewSq = vNext**2 + 2 * aDecel * ds
@@ -357,7 +387,7 @@ class VehicleCalculator:
         self.curvature = lxml.get("curvature", np.array([]))
         
         if len(self.stationHorizontal) > 0 and len(self.curvature) == len(self.stationHorizontal):
-            sort_idx = np.argsort(self.stationHorizontal)
+            sort_idx = np.argsort(self.stationHorizontal, kind="stable")
             self.stationHorizontal = self.stationHorizontal[sort_idx]
             self.curvature = self.curvature[sort_idx]
 
@@ -365,7 +395,7 @@ class VehicleCalculator:
         self.slope = lxml.get("slope", np.array([]))
         
         if len(self.stationVertical) > 1 and len(self.slope) == len(self.stationVertical) - 1:
-            sort_idx = np.argsort(self.stationVertical[:-1])
+            sort_idx = np.argsort(self.stationVertical[:-1], kind="stable")
             sorted_starts = self.stationVertical[:-1][sort_idx]
             max_end = np.max(self.stationVertical)
             self.stationVertical = np.append(sorted_starts, max_end)
@@ -390,7 +420,7 @@ class VehicleCalculator:
                 self.stationSpeedLimits = manual_limits_arr[:, 0]
                 self.speedLimits = manual_limits_arr[:, 1]
 
-                sort_idx = np.argsort(self.stationSpeedLimits)
+                sort_idx = np.argsort(self.stationSpeedLimits, kind="stable")
                 self.stationSpeedLimits = self.stationSpeedLimits[sort_idx]
                 self.speedLimits = self.speedLimits[sort_idx]
             else:
@@ -401,7 +431,7 @@ class VehicleCalculator:
             self.speedLimits = self.data.get(speedProfile[1], np.array([]))
             
             if len(self.stationSpeedLimits) > 0 and len(self.speedLimits) == len(self.stationSpeedLimits):
-                sort_idx = np.argsort(self.stationSpeedLimits)
+                sort_idx = np.argsort(self.stationSpeedLimits, kind="stable")
                 self.stationSpeedLimits = self.stationSpeedLimits[sort_idx]
                 self.speedLimits = self.speedLimits[sort_idx]
 

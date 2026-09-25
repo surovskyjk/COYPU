@@ -169,6 +169,11 @@ def buildSlewSummaryLines(dataStorage, lan):
             f"{lan.get('slewSummaryTravelTime', 'Theoretical travel time change')}: "
             f"{formatSigned(travelTimeDeltaS, 1)} s ({formatDuration(travelTimeDeltaS)})")
 
+    if summary.get("hasClampedChainage"):
+        lines.append(lan.get("slewClampedChainage",
+                             "Warning: at least one straight was consumed past its own start and "
+                             "its length was clamped to zero. Check the affected curve groups."))
+
     # Enlarging a curve between fixed vertices is not a parallel shift, the table shows peaks
     lines.append(lan.get("slewNonParallelNote", NON_PARALLEL_NOTE))
     return lines

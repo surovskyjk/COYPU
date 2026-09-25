@@ -150,6 +150,20 @@ def computeOptimizationMetrics(lxml):
     }
 
 
+# Largest real cant deficiency of a corridor, ignoring elements that sit in cant excess.
+# cDef carries the curve direction in its sign, so the curvature sign is stripped off first.
+def maxCantDeficiency(cantDefValues, curvature):
+    if not hasData(cantDefValues):
+        return None
+    values = np.asarray(cantDefValues, dtype=float)
+    if hasData(curvature) and len(curvature) == len(values):
+        signKappa = np.sign(np.asarray(curvature, dtype=float))
+        values = np.where(signKappa == 0.0, values, signKappa * values)
+    else:
+        values = np.abs(values)
+    return float(max(0.0, float(np.max(values))))
+
+
 # Every scalar and table metric the dashboard and the ZIP exporter need for one variant result
 def computeVariantMetrics(dataStorage, vehicleIndex=0, designProfileSuffix="150"):
     lxml = dataStorage.get("LandXML", {}) or {}
@@ -164,7 +178,7 @@ def computeVariantMetrics(dataStorage, vehicleIndex=0, designProfileSuffix="150"
     totalTimeS, originDestTimeS, interstationRows = computeTravelTimeSections(dataStorage, vehicleIndex)
 
     cantDefValues = lxml.get(f"cDef{designProfileSuffix}")
-    maxCantDefMm = float(np.max(np.abs(cantDefValues))) if hasData(cantDefValues) else None
+    maxCantDefMm = maxCantDeficiency(cantDefValues, lxml.get("curvature"))
 
     cantValues = lxml.get("cantPossible")
     maxCantMm = float(np.max(np.abs(cantValues))) if hasData(cantValues) else None

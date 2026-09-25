@@ -400,6 +400,20 @@ class ReadFile:
         # Convert to numpy arrays (float only)
         stationCant = np.array(stationCant, dtype=float)/1000  # Convert from m to km
         cant = np.array(cant, dtype=float)
+
+        # np.interp reads its samples in order, so a cant table listed out of order would be
+        # interpolated through whatever sequence the file happened to use. A stable sort keeps
+        # two samples that share a chainage in their listed order.
+        if len(stationCant) > 1:
+            order = np.argsort(stationCant, kind="stable")
+            stationCant, cant = stationCant[order], cant[order]
+            # Only an exact repeat is redundant, and the parser creates one itself whenever the
+            # last CantStation already sits at the alignment end. Two samples sharing a chainage
+            # but carrying different cant are a genuine step, at a turnout or a merge seam, and
+            # np.interp renders that step correctly, so they have to survive.
+            isRedundant = np.zeros(len(stationCant), dtype=bool)
+            isRedundant[1:] = (stationCant[1:] == stationCant[:-1]) & (cant[1:] == cant[:-1])
+            stationCant, cant = stationCant[~isRedundant], cant[~isRedundant]
         stationHorizontal = np.array(stationHorizontal, dtype=float)/1000  # Convert from m to km
         geometryType = np.array(geometryType)
         radius = np.array(radius, dtype=float)
@@ -547,6 +561,37 @@ class ReadFile:
                 
         return parsedTTP
     
+    # Element index of the n-th element of one type, taken from the flat geometryType array.
+    # stationHorizontal is a [start, end] pair per element, so index 2*k+1 is element k's end.
+    def elementIndicesOfType(self, parsedXML, elementType):
+        geometryType = parsedXML.get("geometryType")
+        if geometryType is None or len(geometryType) == 0:
+            return []
+        elementTypes = list(np.asarray(geometryType)[::2])
+        return [index for index, name in enumerate(elementTypes) if name == elementType]
+
+    # End chainage of the i-th Curve, addressed by element index where the element stream is
+    # available and by a positive length chainage match otherwise. None when neither resolves.
+    def curveEndStation(self, parsedXML, curveIndex, staStart):
+        stationHorizontal = parsedXML.get("stationHorizontal")
+        if stationHorizontal is None or len(stationHorizontal) == 0:
+            return None
+
+        curveElements = self.elementIndicesOfType(parsedXML, "Curve")
+        if curveIndex < len(curveElements):
+            endIndex = 2 * curveElements[curveIndex] + 1
+            if endIndex < len(stationHorizontal):
+                return float(stationHorizontal[endIndex])
+
+        # No element stream to address: take the first element start matching this chainage
+        # that actually spans a positive length, which is never the preceding element's end.
+        elementStarts = np.asarray(stationHorizontal[::2], dtype=float)
+        for elementIndex in np.where(np.isclose(elementStarts, staStart))[0]:
+            endIndex = 2 * int(elementIndex) + 1
+            if endIndex < len(stationHorizontal) and float(stationHorizontal[endIndex]) > staStart:
+                return float(stationHorizontal[endIndex])
+        return None
+
     def alignmentCoordinates(self, parsedXML, epsgInput, epsgOutput):
         
         alignmentCoords = []
@@ -628,11 +673,12 @@ class ReadFile:
                     )
                 
                 staStart = parsedXML["curveStationStart"][i]
-                staEnd = staStart
-                idx = np.where(np.isclose(parsedXML["stationHorizontal"], staStart))[0]
-                if len(idx) > 0 and idx[0] + 1 < len(parsedXML["stationHorizontal"]):
-                    staEnd = parsedXML["stationHorizontal"][idx[0] + 1]
-                else:
+                # An arc's start chainage also appears as the previous element's end, so
+                # searching the flat station array found that earlier index and read the arc's
+                # own start back as its end. Every dense point of the arc then carried a single
+                # chainage, which snapped the map cursor and station flags to the arc end.
+                staEnd = self.curveEndStation(parsedXML, i, staStart)
+                if staEnd is None:
                     length = sum(np.sqrt((x[k]-x[k-1])**2 + (y[k]-y[k-1])**2) for k in range(1, len(x))) / 1000.0
                     staEnd = staStart + length
                 

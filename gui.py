@@ -4313,14 +4313,53 @@ class MainWindow(QMainWindow):
         limitsOut = np.append(spAsc, spAsc[-1])
         return stationsOut, limitsOut
 
+    # Profiles whose descent ran out of its iteration or time budget, so their D, I and
+    # speeds were designed for a trial speed the solver never actually reached
+    def unconvergedProfiles(self):
+        lxml = self.dataStorage.get("LandXML", {})
+        return [profile for profile in ("I100", "I130", "I150", "K")
+                if lxml.get(f"converged_{profile}") is False]
+
+    # Tell the user when the published cant design is provisional rather than converged
+    def reportConvergenceWarnings(self):
+        unconverged = self.unconvergedProfiles()
+        if not unconverged:
+            return
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        template = lan.get("geometryNotConverged",
+                           "The cant design did not converge for {profiles}. The reported cant "
+                           "and speeds are provisional; raise the iteration step or lower the "
+                           "initial speed and run it again.")
+        QMessageBox.warning(self, lan.get("error", "Error"),
+                            template.format(profiles=", ".join(unconverged)))
+
+    # One guarded entry point for both cant design modes. setLoopsData zeroes every result
+    # array before it computes anything, so an engine error escaping here used to leave a
+    # corridor of zeroes on the plots looking exactly like a finished calculation.
+    def runCantDesign(self, isAsBuilt):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        calculate = geometry_engine.GeometryCalculator(self.dataStorage)
+        try:
+            if isAsBuilt:
+                calculate.runCalculationLoopI()
+            else:
+                calculate.runCalculationLoop()
+        except Exception as exc:
+            self.cleanCalculatedCants()
+            self.cleanCalculatedSpeeds()
+            self.setEngineStatus(lan.get("geometryFailed", "Cant design failed"))
+            QMessageBox.critical(self, lan.get("error", "Error"), str(exc))
+            return False
+        return True
+
     def calculateGeometry(self):
 
         if "alignmentCoordinates" not in self.dataStorage.get("LandXML",{}):
             return
         
         self.lastCalculationMode = "design"
-        calculate = geometry_engine.GeometryCalculator(self.dataStorage)
-        calculate.runCalculationLoop()
+        if not self.runCantDesign(isAsBuilt=False):
+            return
 
         self.updateMapWithSpeeds()
         self.plotCant()
@@ -4331,6 +4370,7 @@ class MainWindow(QMainWindow):
         self.workflowWidget.markCompleted(5)
         self.setEngineStatus(self.translationManager.getLanguage(self.currentLanguage).get("statusGeometryDone", "Geometry calculated"))
         self.markProjectModified()
+        self.reportConvergenceWarnings()
 
     def calculateGeometryI(self):
 
@@ -4338,8 +4378,8 @@ class MainWindow(QMainWindow):
             return
         
         self.lastCalculationMode = "asBuilt"
-        calculate = geometry_engine.GeometryCalculator(self.dataStorage)
-        calculate.runCalculationLoopI()
+        if not self.runCantDesign(isAsBuilt=True):
+            return
 
         self.updateMapWithSpeeds()
         self.plotCant()
@@ -4350,6 +4390,7 @@ class MainWindow(QMainWindow):
         self.workflowWidget.markCompleted(5)
         self.setEngineStatus(self.translationManager.getLanguage(self.currentLanguage).get("statusGeometryDone", "Geometry calculated"))
         self.markProjectModified()
+        self.reportConvergenceWarnings()
 
     # Launches the parametric slew/spiral optimizer on a worker thread, additive to the baseline
     def runAlignmentOptimization(self):
@@ -4379,6 +4420,11 @@ class MainWindow(QMainWindow):
         if self.baselineAlignmentCache is not None:
             return
         cache = {"LandXML": copy.deepcopy(self.dataStorage.get("LandXML", {}))}
+        # Imported TTP chainages are projected onto the optimized axis, so the baseline copy has
+        # to come back before another run, otherwise the projection would be applied twice
+        for storageKey in ("stationSpeedLimits", "speedLimits"):
+            if self.dataStorage.get(storageKey) is not None:
+                cache[storageKey] = copy.deepcopy(self.dataStorage[storageKey])
         for profileSuffix in OPTIMIZED_PROFILE_SUFFIXES:
             for storageKey in (f"speedLimits{profileSuffix}", f"stationSpeed{profileSuffix}"):
                 if self.dataStorage.get(storageKey) is not None:
@@ -4390,7 +4436,19 @@ class MainWindow(QMainWindow):
             if baselineValues is not None:
                 cache[f"{resultKey}_0"] = copy.deepcopy(baselineValues)
 
+        # The cached baseline run belongs to one set of vehicles and one timetable. Comparing a
+        # new run against it after either changed would report a delta between two journeys.
+        cache["runSignature"] = self.baselineRunSignature()
         self.baselineAlignmentCache = cache
+
+    # Everything the cached baseline kinematics depended on, so a vehicle or timetable edit
+    # invalidates it instead of being compared against a journey that no longer exists
+    def baselineRunSignature(self):
+        settingsData = self.dataStorage.get("settingsData", {})
+        return json.dumps({"vehicles": settingsData.get("vehicles"),
+                           "trainStops": settingsData.get("trainStops"),
+                           "runReversed": settingsData.get("runReversed")},
+                          sort_keys=True, default=str)
 
     # Puts the imported geometry back into the active keys, leaving every view refresh to the caller
     def restoreBaselineAlignmentData(self):
@@ -4398,7 +4456,7 @@ class MainWindow(QMainWindow):
             return
         self.dataStorage["LandXML"] = copy.deepcopy(self.baselineAlignmentCache["LandXML"])
         for storageKey, values in self.baselineAlignmentCache.items():
-            if storageKey != "LandXML":
+            if storageKey not in ("LandXML", "runSignature"):
                 self.dataStorage[storageKey] = copy.deepcopy(values)
 
     # The curvature plot and the map keep a muted baseline to compare the active geometry against
@@ -4510,6 +4568,19 @@ class MainWindow(QMainWindow):
             if payload.get(chainageKey) is not None:
                 lxml[chainageKey] = payload[chainageKey]
 
+        # Element coordinates follow the geometry, otherwise a LandXML export would carry the
+        # imported points under the optimized stationing and lengths
+        geometry_engine.promoteOptimizedElements(lxml, payload.get("elementArraysNew"))
+
+        # Measured cant, the gradient profile and the imported TTP signs were all recorded
+        # against the imported chainage, so they follow the alignment onto its new stationing
+        geometry_engine.projectChainageArrays(lxml)
+        ttpStations = self.dataStorage.get("stationSpeedLimits")
+        if ttpStations is not None and len(ttpStations) > 0:
+            self.dataStorage["stationSpeedLimits"] = np.array(
+                [geometry_engine.projectChainageKm(lxml, float(station)) for station in ttpStations],
+                dtype=float)
+
         # Cant was designed for the old geometry, so it cannot describe the new one
         self.clearCalculatedResults()
 
@@ -4525,8 +4596,16 @@ class MainWindow(QMainWindow):
     # Two native D+I passes are expensive, so an unchanged summary is annotated only once
     def optimizationImpactSignature(self, summary):
         settingsData = self.dataStorage.get("settingsData", {})
+        # The two impact passes run the cant design, so every input that design reads belongs in
+        # the signature. Without the norm tables and the speed inputs an edited limit left the
+        # cached speed deltas on screen describing a design that no longer existed.
+        designInputs = json.dumps({key: settingsData.get(key)
+                                   for key in ("I", "dI", "nLin", "nILin", "vInit", "maxD",
+                                               "designApproach", "disableGeometryMaxD",
+                                               "balanceInflectionCants")},
+                                  sort_keys=True, default=str)
         return (id(summary), summary.get("optimizedGroupCount"),
-                self.dataStorage.get("defaultProfile"), settingsData.get("designApproach"),
+                self.dataStorage.get("defaultProfile"), designInputs,
                 len(self.dataStorage.get("LandXML", {}).get("stationHorizontal", [])))
 
     # Per curve group speed impact, evaluated on the fly against the imported alignment
@@ -4558,6 +4637,11 @@ class MainWindow(QMainWindow):
 
     # Active minus baseline total run time of the first vehicle, in seconds
     def computeTravelTimeDelta(self):
+        cache = self.baselineAlignmentCache or {}
+        # A delta is only meaningful between two runs of the same train over the same timetable
+        if cache.get("runSignature") != self.baselineRunSignature():
+            return None
+
         baselineView = {"settingsData": self.dataStorage.get("settingsData", {})}
         for resultKey in optimization_runner.KINEMATICS_RESULT_KEYS:
             baselineValues = (self.baselineAlignmentCache or {}).get(f"{resultKey}_0")
@@ -4767,8 +4851,16 @@ class MainWindow(QMainWindow):
         vehicles = profile_state.vehicleSettingsList(self.dataStorage)
         profileKeys = simulation_runner.evaluableProfileKeys(self.dataStorage, vehicles)
         if not profileKeys:
-            self.setEngineStatus(lan.get("statusSimulationNoProfile",
-                                         "No speed profile is available to simulate"))
+            headline = lan.get("statusSimulationNoProfile",
+                               "No speed profile is available to simulate")
+            self.setEngineStatus(headline)
+            # A status bar line alone hid the reason, which is usually a certification ceiling
+            reasonTexts = self.buildProfileBlockedTexts()
+            blockedLines = [f"{profile_state.profileShortName(profileKey)}: {reasonTexts[profileKey]}"
+                            for profileKey in profile_state.PROFILE_KEYS
+                            if reasonTexts.get(profileKey)]
+            QMessageBox.warning(self, lan.get("error", "Error"),
+                                "\n".join([headline] + blockedLines))
             return
 
         self.setBatchActionsEnabled(False)
@@ -4841,6 +4933,10 @@ class MainWindow(QMainWindow):
             "train_too_long": lan.get("train_too_long", "Train is longer than the section"),
             "noTrackData": lan.get("simulationNoTrackData",
                                    "No alignment or speed profile data to simulate against"),
+            vehicle_engine.WARNING_ZERO_SPEED_SECTION: lan.get(
+                "zeroSpeedSection",
+                "The selected design profile permits no speed on part of the line, so no run "
+                "could be simulated. Check the cant design for elements limited to 0 km/h."),
             simulation_runner.WARNING_NOT_CERTIFIED: lan.get(
                 "profileNotCertified", "Vehicle is not certified for the active speed profile"),
         }

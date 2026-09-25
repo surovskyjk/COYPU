@@ -4,6 +4,14 @@ import time
 import numpy as np
 from pyclothoids import Clothoid
 
+# Absolute ceiling on the descent, so a pathologically fine iteration step cannot wedge the
+# application. Reaching it leaves converged_<profile> False rather than faking a design.
+ITERATION_HARD_CAP = 4000
+
+# Wall clock ceiling on one profile's descent, for the same reason, in seconds
+ITERATION_TIME_BUDGET_S = 20.0
+
+
 class GeometryCalculator:
     def __init__(self, dataStorage):
         self.data = dataStorage
@@ -41,10 +49,20 @@ class GeometryCalculator:
 
         lxml["stationCantPossible"] = lxml.get("stationHorizontal",[])
 
-        self.vInit = np.full(len(lxml["stationCantPossible"]),defaultVal.get("vInit",[120])[0])
-        self.vMax = np.full(len(lxml["stationCantPossible"]),defaultVal.get("vInit",[0])[0])
+        # dtype matters: the default vInit of [120] is an int, which used to make the whole
+        # descent integer and silently quantise any iterationStep below 1 km/h up to 1 km/h
+        self.vInit = np.full(len(lxml["stationCantPossible"]), defaultVal.get("vInit",[120])[0], dtype=float)
+        self.vMax = np.full(len(lxml["stationCantPossible"]), defaultVal.get("vInit",[0])[0], dtype=float)
         maxD_val = defaultVal.get("maxD", 150.0)
         self.maxD = float(maxD_val[0]) if isinstance(maxD_val, list) else float(maxD_val)
+
+        # A non positive or non finite step can never converge, and used to surface much later
+        # as "cannot convert float NaN to integer" from deep inside calculateSpeed
+        iterationStepValue = float(defaultVal.get("iterationStep", 5.0))
+        if not np.isfinite(iterationStepValue) or iterationStepValue <= 0:
+            raise ValueError("iterationStep must be a positive speed in km/h, got "
+                             + repr(defaultVal.get("iterationStep")))
+        self.iterationStep = iterationStepValue
         self.isGeometryMaxDDisabled = bool(defaultVal.get("disableGeometryMaxD", False))
         self.isInflectionBalancingEnabled = bool(defaultVal.get("balanceInflectionCants", False))
 
@@ -79,7 +97,9 @@ class GeometryCalculator:
 
         # Pointers
         self.cant = lxml.get("cant",np.zeros(lenStationPos))
-        self.stationsCant = lxml.get("stationCant","stationCantPossible")
+        # The fallback used to be the literal string "stationCantPossible", which reached
+        # np.interp as a scalar and raised TypeError from inside the as built loop
+        self.stationsCant = lxml.get("stationCant", lxml["stationCantPossible"])
         self.stationsNew = lxml["stationCantPossible"]
         self.cantNew = lxml["cantPossible"]
         self.cDef100 = lxml["cDef100"]
@@ -111,6 +131,15 @@ class GeometryCalculator:
         self.dIdt130 = lxml["dIdt130"]
         self.dIdt150 = lxml["dIdt150"]
         self.dIdtK = lxml["dIdtK"]
+
+    # Iterations the descent may take. The configured value is a floor rather than a cap:
+    # the loop sheds one step per iteration, so a budget shorter than the distance from vInit
+    # down to the answer used to stop early and publish the trial speed as if it were a design.
+    def resolveIterationBudget(self, iterationStep):
+        configured = int(self.data.get("settingsData", {}).get("maxIterations", 50))
+        highestTrialSpeed = float(np.max(self.vInit)) if len(self.vInit) else 0.0
+        required = int(np.ceil(highestTrialSpeed / iterationStep)) + 2
+        return max(1, min(max(configured, required), ITERATION_HARD_CAP))
 
     def sumCantDef(self):
         lxml = self.data.get("LandXML",{})
@@ -207,10 +236,17 @@ class GeometryCalculator:
         # Iterative solver
         convergenceReached = False
         iterationN = 0
-        iterationStep = float(self.data.get("settingsData", {}).get("iterationStep", 5.0))
-        maxIterations = int(self.data.get("settingsData", {}).get("maxIterations", 50))
+        iterationStep = self.iterationStep
+        maxIterations = self.resolveIterationBudget(iterationStep)
+
+        # A fine iteration step on a long alignment can need thousands of passes, so the
+        # descent is bounded in time as well. Running out leaves convergenceReached False,
+        # which the caller reports, rather than freezing the application.
+        solverDeadline = time.perf_counter() + ITERATION_TIME_BUDGET_S
 
         while not convergenceReached and iterationN < maxIterations:
+            if time.perf_counter() > solverDeadline:
+                break
             convergenceReached = True
             iterationN += 1
 
@@ -438,9 +474,17 @@ class GeometryCalculator:
 
                 if self.vMax[i] < self.vInit[i] or self.vMax[i+1] < self.vInit[i+1]:
                     if self.vInit[i] > iterationStep:
+                        # One grid step at a time on purpose: the permissible speed is increasing
+                        # in the trial speed, because D is designed for it, so the loop is looking
+                        # for the largest self-consistent speed and must not jump past it
                         self.vInit[i] -= iterationStep
                         self.vInit[i+1] -= iterationStep
                         convergenceReached = False
+
+        # A run that ran out of iterations designed D and I at a trial speed it never reached,
+        # so the result is recorded as provisional instead of being presented as a design
+        self.data["LandXML"][f"converged_{profile}"] = bool(convergenceReached)
+        self.data["LandXML"][f"iterationCount_{profile}"] = int(iterationN)
 
         # # Debugging print
         # for i in range(0,len(self.cantNew)):
@@ -457,19 +501,29 @@ class GeometryCalculator:
             signD = np.sign(self.cantNew[i]) if self.cantNew[i] != 0 else 1.0
             self.cantNew[i] = signD * np.floor(np.abs(self.cantNew[i]))
             
-            temp_I = np.ceil(np.abs(self.calculateCantDef(self.vMax[i], np.abs(self.cantNew[i]), np.abs(self.kappa[i]))))
+            # Signed on purpose: a negative value is cant excess (D above equilibrium),
+            # which is physically the opposite of a deficiency and must not be folded away
+            temp_I = self.calculateCantDef(self.vMax[i], np.abs(self.cantNew[i]), np.abs(self.kappa[i]))
 
             # Finální kontrola matematického vztahu - V = sqrt((D+I)*R/11.8)
+            # Only a real deficiency buys speed headroom, an excess is never credited as one
             if np.abs(self.kappa[i]) > 0:
-                v_check = np.sqrt((np.abs(self.cantNew[i]) + temp_I) / (11.8 * np.abs(self.kappa[i])))
+                headroomI = max(0.0, float(np.ceil(temp_I)))
+                v_check = np.sqrt((np.abs(self.cantNew[i]) + headroomI) / (11.8 * np.abs(self.kappa[i])))
                 self.vMax[i] = min(self.vMax[i], v_check)
-                
+
             # Zaokrouhlení výsledné rychlosti na krok iterace dolů
             self.vMax[i] = np.floor(self.vMax[i] / iterationStep) * iterationStep
 
-            # Skutečný přepočet nedostatku převýšení pro finální rychlost
+            # Skutečný přepočet nedostatku převýšení pro finální rychlost.
+            # Velikost se zaokrouhluje nahoru, znaménko nedostatku zůstává zachováno.
             signKappa = np.sign(self.kappa[i]) if self.kappa[i] != 0 else 1.0
-            self.cantDef[i] = signKappa * np.ceil(np.abs(self.calculateCantDef(self.vMax[i], np.abs(self.cantNew[i]), np.abs(self.kappa[i]))))
+            finalI = self.calculateCantDef(self.vMax[i], np.abs(self.cantNew[i]), np.abs(self.kappa[i]))
+            self.cantDef[i] = signKappa * np.sign(finalI) * np.ceil(np.abs(finalI))
+
+        # Elements the design could give no permissible speed at all, so a run can refuse them
+        # rather than inventing a crawl through a section no train could actually traverse
+        self.data["LandXML"][f"zeroSpeed_{profile}"] = np.asarray(self.vMax <= 0.0, dtype=bool)
 
         self.determineLimitReasons(profile, approach, profileI)
 
@@ -546,10 +600,17 @@ class GeometryCalculator:
         # Iterative solver
         convergenceReached = False
         iterationN = 0
-        iterationStep = float(self.data.get("settingsData", {}).get("iterationStep", 5.0))
-        maxIterations = int(self.data.get("settingsData", {}).get("maxIterations", 50))
+        iterationStep = self.iterationStep
+        maxIterations = self.resolveIterationBudget(iterationStep)
+
+        # A fine iteration step on a long alignment can need thousands of passes, so the
+        # descent is bounded in time as well. Running out leaves convergenceReached False,
+        # which the caller reports, rather than freezing the application.
+        solverDeadline = time.perf_counter() + ITERATION_TIME_BUDGET_S
 
         while not convergenceReached and iterationN < maxIterations:
+            if time.perf_counter() > solverDeadline:
+                break
             convergenceReached = True
             iterationN += 1
 
@@ -694,9 +755,17 @@ class GeometryCalculator:
 
                 if self.vMax[i] < self.vInit[i] or self.vMax[i+1] < self.vInit[i+1]:
                     if self.vInit[i] > iterationStep:
+                        # One grid step at a time on purpose: the permissible speed is increasing
+                        # in the trial speed, because D is designed for it, so the loop is looking
+                        # for the largest self-consistent speed and must not jump past it
                         self.vInit[i] -= iterationStep
                         self.vInit[i+1] -= iterationStep
                         convergenceReached = False
+
+        # A run that ran out of iterations designed D and I at a trial speed it never reached,
+        # so the result is recorded as provisional instead of being presented as a design
+        self.data["LandXML"][f"converged_{profile}"] = bool(convergenceReached)
+        self.data["LandXML"][f"iterationCount_{profile}"] = int(iterationN)
 
         # # Debugging print
         # for i in range(0,len(self.cantNew)):
@@ -712,19 +781,29 @@ class GeometryCalculator:
             signD = np.sign(self.cantNew[i]) if self.cantNew[i] != 0 else 1.0
             self.cantNew[i] = signD * np.floor(np.abs(self.cantNew[i]))
             
-            temp_I = np.ceil(np.abs(self.calculateCantDef(self.vMax[i], np.abs(self.cantNew[i]), np.abs(self.kappa[i]))))
+            # Signed on purpose: a negative value is cant excess (D above equilibrium),
+            # which is physically the opposite of a deficiency and must not be folded away
+            temp_I = self.calculateCantDef(self.vMax[i], np.abs(self.cantNew[i]), np.abs(self.kappa[i]))
 
             # Finální kontrola matematického vztahu - V = sqrt((D+I)*R/11.8)
+            # Only a real deficiency buys speed headroom, an excess is never credited as one
             if np.abs(self.kappa[i]) > 0:
-                v_check = np.sqrt((np.abs(self.cantNew[i]) + temp_I) / (11.8 * np.abs(self.kappa[i])))
+                headroomI = max(0.0, float(np.ceil(temp_I)))
+                v_check = np.sqrt((np.abs(self.cantNew[i]) + headroomI) / (11.8 * np.abs(self.kappa[i])))
                 self.vMax[i] = min(self.vMax[i], v_check)
-                
+
             # Zaokrouhlení výsledné rychlosti na krok iterace dolů
             self.vMax[i] = np.floor(self.vMax[i] / iterationStep) * iterationStep
 
-            # Skutečný přepočet nedostatku převýšení pro finální rychlost
+            # Skutečný přepočet nedostatku převýšení pro finální rychlost.
+            # Velikost se zaokrouhluje nahoru, znaménko nedostatku zůstává zachováno.
             signKappa = np.sign(self.kappa[i]) if self.kappa[i] != 0 else 1.0
-            self.cantDef[i] = signKappa * np.ceil(np.abs(self.calculateCantDef(self.vMax[i], np.abs(self.cantNew[i]), np.abs(self.kappa[i]))))
+            finalI = self.calculateCantDef(self.vMax[i], np.abs(self.cantNew[i]), np.abs(self.kappa[i]))
+            self.cantDef[i] = signKappa * np.sign(finalI) * np.ceil(np.abs(finalI))
+
+        # Elements the design could give no permissible speed at all, so a run can refuse them
+        # rather than inventing a crawl through a section no train could actually traverse
+        self.data["LandXML"][f"zeroSpeed_{profile}"] = np.asarray(self.vMax <= 0.0, dtype=bool)
 
         self.determineLimitReasons(profile, approach, profileI)
 
@@ -772,7 +851,10 @@ class GeometryCalculator:
 
             v_check = self.vMax[i]
 
-            I_val = np.abs(self.cantDef[i])
+            # cantDef carries the curve direction in its sign, so strip it to recover the
+            # physical I. An element in cant excess does not load the deficiency limit at all.
+            signKappa = np.sign(self.kappa[i]) if self.kappa[i] != 0 else 1.0
+            I_val = max(0.0, float(signKappa * self.cantDef[i]))
             D_val = np.abs(self.cantNew[i])
             kappa_val = np.abs(self.kappa[i])
 
@@ -824,11 +906,12 @@ class GeometryCalculator:
     def calculateSpeed(self, D, I, kappa, round, vInit):
         if kappa == 0:
             return vInit
-        if round == 0:
-            return np.sqrt(max(0, np.abs(D + I) / (11.8 * np.abs(kappa))))
-
-        return (int(np.sqrt(max(0, np.abs(D + I) / (11.8 * np.abs(kappa))))) // round) * round
-
+        speed = np.sqrt(max(0, np.abs(D + I) / (11.8 * np.abs(kappa))))
+        # A non positive step means "do not round". The old int() truncation before the floor
+        # divide crashed on a NaN step and quantised every fractional step to whole km/h.
+        if round <= 0:
+            return speed
+        return np.floor(speed / round) * round
     def calculateBoundarySpeed(self, deltaI_lim, dKappa):
         """v_lim = sqrt(deltaI_lim / (11.8·dKappa)) at an L=0 curvature boundary.
         D cancels because Stage 3 enforces cant continuity at L=0 junctions."""
@@ -850,7 +933,11 @@ class GeometryCalculator:
             return np.inf
         effective_lim = deltaI_lim + dD_credit
         if effective_lim <= 0:
-            return 0.0  # no speed can satisfy this constraint
+            # The virtual criterion is inapplicable once the cant credit cancels the whole
+            # allowance. The caller takes the more lenient of the two criteria, so returning
+            # zero here used to force a 0 km/h design whenever the nI criterion also did not
+            # apply, which the kinematics run then turned into a crawl through the section.
+            return np.inf
         return np.sqrt(effective_lim / (11.8 * dKappa))
 
     def calculateSpeedCant(self, length, dD, nLin):
@@ -867,56 +954,49 @@ class GeometryCalculator:
         if getattr(self, "isGeometryMaxDDisabled", False):
             return np.inf
         radius = 1/np.abs(kappa)
+        # Below 50 m the expression turns negative, which propagated as a negative cant ceiling
         maxD = np.floor((radius - 50)/1.5)
-        return maxD
+        return max(0.0, float(maxD))
         
     def resetInitialSpeed(self):
         defaultVal = self.data.get("settingsData",{})
         lxml = self.data.get("LandXML",{})
         lenStationPos = len(lxml.get("stationHorizontal",[]))
 
-        self.vInit = np.full(lenStationPos,defaultVal.get("vInit",[120])[0])
-        self.vMax = np.full(lenStationPos, defaultVal.get("vInit", [0])[0])
+        self.vInit = np.full(lenStationPos, defaultVal.get("vInit",[120])[0], dtype=float)
+        self.vMax = np.full(lenStationPos, defaultVal.get("vInit", [0])[0], dtype=float)
 
-    def getNormLimit(self, parameter, speedLimit, approach): 
-        normLimits = self.data.get("settingsData", {}).get(parameter,[])
+    def getNormLimit(self, parameter, speedLimit, approach):
+        normLimits = self.data.get("settingsData", {}).get(parameter, [])
 
         if isinstance(approach, dict):
             current_approach = approach.get(parameter, "standard")
         else:
             current_approach = approach
 
+        # nLin carries a proportional coefficient and an absolute floor, everything else one value
         if parameter == "nLin":
-            approachDict = {
-                "standard": 2,
-                "limit": 4,
-                "minmax": 6
-            }
-
+            approachDict = {"standard": 2, "limit": 4, "minmax": 6}
+            columnCount = 2
         else:
-            approachDict = {
-                "standard": 2,
-                "limit": 3,
-                "minmax": 4
-            }
+            approachDict = {"standard": 2, "limit": 3, "minmax": 4}
+            columnCount = 1
 
-        col = approachDict.get(current_approach, 3)
+        col = approachDict.get(current_approach, approachDict["standard"])
 
-        if parameter == "nLin":
-            for row in normLimits:
-                vMin, vMax = row[0], row[1]
-                if vMin < speedLimit <= vMax:
-                    return np.array([row[col],row[col+1]])
-                
-            return np.array([normLimits[-1][col]]) if normLimits else np.array([0,0])
+        if not normLimits:
+            return np.zeros(columnCount)
 
-        else:
-            for row in normLimits:
-                vMin, vMax = row[0], row[1]
-                if vMin < speedLimit <= vMax:
-                    return np.array([row[col]])  
-            
-            return np.array([normLimits[-1][col]]) if normLimits else np.array([0])
+        for row in normLimits:
+            vMin, vMax = row[0], row[1]
+            if vMin < speedLimit <= vMax:
+                return np.array(row[col:col + columnCount])
+
+        # Outside every band: below the first one the gentlest row applies, above the last one
+        # the strictest. The fallback must keep the same width, because a one element nLin
+        # result raised IndexError inside calculateCantN instead of naming the real problem.
+        fallbackRow = normLimits[0] if speedLimit <= normLimits[0][0] else normLimits[-1]
+        return np.array(fallbackRow[col:col + columnCount])
 
 
 # --- Alignment optimization ---
@@ -933,6 +1013,26 @@ OPTIMIZATION_MODES = (OPTIMIZATION_MODE_SHIFT_AND_EXTEND, OPTIMIZATION_MODE_EXTE
 # An L-C-L group has no transitions to extend, so only the arc shift is meaningful there
 LCL_OPTIMIZATION_MODES = (OPTIMIZATION_MODE_SHIFT_ARC,)
 
+# Only these two patterns may ever be reshaped. A reverse (S) curve and every other compound
+# pattern is a different geometry problem and is left exactly as imported by the slew stage.
+OPTIMIZABLE_PATTERNS = ("lcl", "lscsl")
+
+# Why a pattern outside OPTIMIZABLE_PATTERNS was left alone, reported per group
+SKIP_REASON_BY_PATTERN = {
+    "compound": "optSkipCompound",
+    "reverseCompound": "optSkipReverseCurve",
+    "notClothoid": "optSkipNotClothoid",
+}
+
+# Human readable element sequence of every pattern the classifier can return
+ELEMENT_PATTERN_NAMES = {
+    "lcl": "L-C-L",
+    "lscsl": "L-S-C-S-L",
+    "notClothoid": "L-S-C-S-L",
+    "reverseCompound": "S-C-S-S-C-S",
+    "compound": "compound",
+}
+
 # Per-type parser arrays the optimizer needs, appended to LEAN_LANDXML_KEYS for batch runs
 OPTIMIZER_INPUT_KEYS = (
     "lineStartX", "lineStartY", "lineEndX", "lineEndY", "lineStationStart",
@@ -942,6 +1042,24 @@ OPTIMIZER_INPUT_KEYS = (
     "curveStartX", "curveStartY", "curveEndX", "curveEndY", "curveCenterX", "curveCenterY",
     "curveStationStart", "curveRot", "curveRadius"
 )
+
+
+# Copy the optimizer's per element geometry over the baseline arrays of one LandXML dict.
+# Without this a promoted alignment keeps its imported coordinates under the new stationing,
+# so the LandXML export and the batch map view both describe the axis that was replaced.
+def promoteOptimizedElements(landXml, optimizedElements):
+    if not optimizedElements:
+        return
+    for elementKey in OPTIMIZER_INPUT_KEYS:
+        if elementKey in optimizedElements:
+            landXml[elementKey] = optimizedElements[elementKey]
+
+
+# spiType values the optimizer is willing to treat as a clothoid. A Bloss, cosine or
+# biquadratic transition follows a different curve, so resampling it as a clothoid would
+# measure the slew against an axis the imported alignment never had.
+CLOTHOID_SPIRAL_TYPES = ("", "clothoid", "none", "nan")
+
 
 # Spiral shorter than this is treated as geometrically degenerate, not a real clothoid
 MIN_CLOTHOID_LENGTH_M = 0.5
@@ -960,6 +1078,9 @@ SLEW_ZERO_EPSILON_MM = 1e-6
 
 # Two chainages closer than this are the same node, np.interp needs strictly increasing samples
 CHAINAGE_EPSILON_KM = 1e-9
+
+# Slack allowed when comparing a straight against its minimum length, in metres
+STRAIGHT_LENGTH_EPSILON_M = 1e-6
 
 # An arc allowed to fall below L_min must beat its baseline by at least this margin
 ARC_IMPROVEMENT_EPSILON_M = 1e-6
@@ -1195,6 +1316,25 @@ def pointToPolylineNearest(p, polyline):
     return best, bestPoint, bestDirection
 
 
+# Arrays whose chainages were measured on the imported alignment. They are entered against
+# baseline stationing, so once the axis is re-chained they have to follow the same map the
+# scheduled stops do, or the as built cant and the gradient profile are read at the wrong place.
+PROJECTED_CHAINAGE_KEYS = ("stationCant", "stationVertical")
+
+
+# Project every measured chainage array of one LandXML dict onto the active stationing.
+# Safe to call once per promotion: the caller always starts from a fresh baseline copy.
+def projectChainageArrays(landXml):
+    if not landXml or landXml.get("chainageMapBaselineKm") is None:
+        return
+    for stationKey in PROJECTED_CHAINAGE_KEYS:
+        values = landXml.get(stationKey)
+        if values is None or len(values) == 0:
+            continue
+        landXml[stationKey] = np.array([projectChainageKm(landXml, float(value))
+                                        for value in values], dtype=float)
+
+
 # Map a chainage from the imported alignment onto the active one, identity while nothing moved
 def projectChainageKm(lxml, stationKm):
     baselineKm = (lxml or {}).get("chainageMapBaselineKm")
@@ -1217,8 +1357,11 @@ class AlignmentOptimizer:
         self.dMaxM = float(config.get("dMaxM", 0.5))
         self.lMinM = float(config.get("lMinM", 25.0))
         self.lkMaxM = float(config.get("lkMaxM", DEFAULT_LK_MAX_M))
-        # An absent ceiling means the slew envelope is the only thing bounding the radius
-        self.rMaxM = float(config.get("rMaxM", DEFAULT_R_MAX_M)) if config.get("isRMaxEnabled") else None
+        # An absent user ceiling still gets the sanity bound the dialog itself enforces. On a
+        # near straight kink sec(delta/2) is barely above one, so the apex offset hardly moves
+        # with the radius and the search ran out to 150 km before the envelope stopped it.
+        self.rMaxM = (float(config.get("rMaxM", DEFAULT_R_MAX_M)) if config.get("isRMaxEnabled")
+                      else R_MAX_MAXIMUM_M)
         # Share of the envelope mode 5 spends on the radius, the remainder goes to the transitions
         self.ratioCPercent = float(config.get("ratioCPercent", DEFAULT_RATIO_C_PERCENT))
         self.modeLcl = config.get("modeLcl", OPTIMIZATION_MODE_NONE)
@@ -1314,6 +1457,8 @@ class AlignmentOptimizer:
             "length": float(self.lxml["spiralLength"][idx]),
             "radiusStart": float(self.lxml["spiralRadiusStart"][idx]), "radiusEnd": float(self.lxml["spiralRadiusEnd"][idx]),
             "rot": self.lxml["spiralRot"][idx],
+            "spiralType": (self.lxml["spiralType"][idx]
+                           if idx < len(self.lxml.get("spiralType", [])) else None),
         }
 
     def buildCurveElement(self, elemIdx, idx, staStart, staEnd, curvSign):
@@ -1363,21 +1508,20 @@ class AlignmentOptimizer:
     def isClothoidSpiral(self, spiralElement):
         if spiralElement.get("length", 0.0) <= MIN_CLOTHOID_LENGTH_M:
             return False
+        # A transition of another family is sampled by evaluateClothoid as if it were a clothoid,
+        # so the candidate would be compared against an axis the import never followed
+        spiralType = spiralElement.get("spiralType")
+        if spiralType is not None and str(spiralType).strip().lower() not in CLOTHOID_SPIRAL_TYPES:
+            return False
         return np.isinf(spiralElement["radiusStart"]) or np.isinf(spiralElement["radiusEnd"])
-
-    # --- Group optimization dispatch ---
-
     def optimizeGroup(self, groupRange):
         startIdx, endIdx = groupRange
         runElements = self.elements[startIdx:endIdx]
         patternType = self.classifyPattern(runElements)
 
-        if patternType == "reverseCompound":
-            self.optimizeReverseCompound(startIdx, endIdx, runElements)
-            return
-
-        if patternType not in ("lcl", "lscsl"):
-            reason = "optSkipCompound" if patternType == "compound" else "optSkipNotClothoid"
+        # A reverse (S) curve and every other compound pattern stays exactly as imported
+        if patternType not in OPTIMIZABLE_PATTERNS:
+            reason = SKIP_REASON_BY_PATTERN.get(patternType, "optSkipNotClothoid")
             self.recordSkip(startIdx, endIdx, patternType, reason)
             return
 
@@ -1399,49 +1543,6 @@ class AlignmentOptimizer:
 
         self.solveGroup(startIdx, endIdx, patternType, mode, lineBefore, lineAfter, runElements)
 
-    def optimizeReverseCompound(self, startIdx, endIdx, runElements):
-        mode = self.modeLscsl
-        if mode == OPTIMIZATION_MODE_NONE:
-            self.recordSkip(startIdx, endIdx, "reverseCompound", "optSkipPatternDisabled")
-            return
-
-        lineBefore = self.elements[startIdx-1] if startIdx-1 >= 0 and self.elements[startIdx-1]["type"] == "Line" else None
-        lineAfter = self.elements[endIdx] if endIdx < len(self.elements) and self.elements[endIdx]["type"] == "Line" else None
-        if lineBefore is None or lineAfter is None:
-            self.recordSkip(startIdx, endIdx, "reverseCompound", "optSkipNoTangent")
-            return
-
-        firstHalf = runElements[0:3]
-        secondHalf = runElements[3:6]
-        midEntry, midExit = runElements[2], runElements[3]
-        if abs(midEntry["endX"] - midExit["startX"]) > 1e-3 or abs(midEntry["endY"] - midExit["startY"]) > 1e-3:
-            self.recordSkip(startIdx, endIdx, "reverseCompound", "optSkipDiscontinuous")
-            return
-
-        headingBefore = self.spiralHeadingAt(midEntry, atStart=False)
-        headingAfter = self.spiralHeadingAt(midExit, atStart=True)
-        if vecDot(headingBefore, headingAfter) < 1 - 1e-6:
-            self.recordSkip(startIdx, endIdx, "reverseCompound", "optSkipDiscontinuous")
-            return
-
-        # Virtual fixed tangent through the baseline inflection point, standing in for a bounding Line
-        virtualLine = {
-            "elemIndex": None, "isVirtual": True, "type": "Line",
-            "startX": midEntry["endX"], "startY": midEntry["endY"],
-            "endX": midEntry["endX"] + headingBefore[0], "endY": midEntry["endY"] + headingBefore[1],
-        }
-
-        # The side touching the virtual junction keeps its baseline spiral length, only the outer side may grow
-        self.solveGroup(startIdx, startIdx+3, "lscsl", mode, lineBefore, virtualLine, firstHalf, allowExtendExit=False)
-        self.solveGroup(startIdx+3, endIdx, "lscsl", mode, virtualLine, lineAfter, secondHalf, allowExtendEntry=False)
-
-    def spiralHeadingAt(self, spiralElement, atStart):
-        if atStart:
-            return vecNormalize(vecSub((spiralElement["piX"], spiralElement["piY"]), (spiralElement["startX"], spiralElement["startY"])))
-        return vecNormalize(vecSub((spiralElement["endX"], spiralElement["endY"]), (spiralElement["piX"], spiralElement["piY"])))
-
-    # --- Fixed frame and candidate geometry ---
-
     def buildFixedFrame(self, lineBefore, lineAfter):
         anchor1 = (lineBefore["endX"], lineBefore["endY"])
         u1 = vecNormalize(vecSub(anchor1, (lineBefore["startX"], lineBefore["startY"])))
@@ -1459,14 +1560,19 @@ class AlignmentOptimizer:
             "pi": pi, "deflection": deflection, "turnSign": turnSign,
         }
 
+    # Spiral angle, shift of the arc off the tangent and the tangent foot abscissa.
+    # Taken from the clothoid itself rather than the classic two term series: at L/(2R) beyond
+    # about 20 degrees the series left the spiral end roughly two millimetres off the arc it is
+    # supposed to meet, and the same pair of numbers positions the emitted element endpoints.
     def clothoidShiftAndFoot(self, L, R):
         if R <= 0 or L <= 0:
             return 0.0, 0.0, 0.0
         thetaS = L / (2.0 * R)
-        deltaR = (L*L)/(24.0*R) - (L**4)/(2688.0*(R**3))
-        xm = L/2.0 - (L**3)/(240.0*R*R)
+        spiral = Clothoid.StandardParams(0.0, 0.0, 0.0, 0.0, 1.0 / (R * L), L)
+        endX, endY = float(spiral.X(L)), float(spiral.Y(L))
+        deltaR = endY - R * (1.0 - math.cos(thetaS))
+        xm = endX - R * math.sin(thetaS)
         return thetaS, deltaR, xm
-
     def solveCenter(self, frame, offset1, offset2):
         n1, n2 = frame["n1"], frame["n2"]
         b1 = vecDot(n1, frame["anchor1"]) + offset1
@@ -1570,9 +1676,7 @@ class AlignmentOptimizer:
 
     # Human readable element sequence of one group, used by the slew report table
     def describeElementPattern(self, patternType):
-        return "L-C-L" if patternType == "lcl" else "L-S-C-S-L"
-
-    # Signed perpendicular offsets of an accepted candidate axis, run once per optimized group
+        return ELEMENT_PATTERN_NAMES.get(patternType, str(patternType or "unknown"))
     def recordSlewProfile(self, groupSlot, frame, geometry, baselineAxis):
         samplingStarted = time.perf_counter()
         try:
@@ -1677,13 +1781,15 @@ class AlignmentOptimizer:
         if element["type"] != "Line" or not endpoints:
             return float(baselineLengthM)
 
-        # A moved straight keeps its stationing length minus whatever the neighbouring curves consumed
-        startX, startY = endpoints.get("startXY", (element["startX"], element["startY"]))
-        endX, endY = endpoints.get("endXY", (element["endX"], element["endY"]))
-        newChordM = float(np.hypot(endX - startX, endY - startY))
+        # A moved straight keeps its stationing length minus whatever the neighbouring curves
+        # consumed. The chord is projected onto the straight's own direction rather than taken
+        # as a distance, so a straight consumed past its own start reads negative and is caught.
+        startXY = endpoints.get("startXY", (element["startX"], element["startY"]))
+        endXY = endpoints.get("endXY", (element["endX"], element["endY"]))
+        direction = vecNormalize(vecSub((element["endX"], element["endY"]),
+                                        (element["startX"], element["startY"])))
+        newChordM = float(vecDot(vecSub(endXY, startXY), direction))
         return float(baselineLengthM - (self.lineBaselineLength(element) - newChordM))
-
-    # Walk every element from the alignment start so the station array is monotonic by construction
     def rebuildCumulativeChainage(self):
         stations = []
         runningStationKm = float(self.elements[0]["staStart"]) if self.elements else 0.0
@@ -1750,11 +1856,9 @@ class AlignmentOptimizer:
     # --- Shared line budget (lMin-or-zero rule) ---
 
     def lineKey(self, lineElement):
-        return ("virtual", id(lineElement)) if lineElement.get("isVirtual") else (lineElement["type"], lineElement["typeIdx"])
+        return (lineElement["type"], lineElement["typeIdx"])
 
     def lineBaselineLength(self, lineElement):
-        if lineElement.get("isVirtual"):
-            return 0.0
         return float(np.hypot(lineElement["endX"]-lineElement["startX"], lineElement["endY"]-lineElement["startY"]))
 
     def availableLineBudget(self, lineElement):
@@ -1763,13 +1867,22 @@ class AlignmentOptimizer:
             self.lineRemainingLength[key] = self.lineBaselineLength(lineElement)
         return self.lineRemainingLength[key]
 
-    def consumeLine(self, lineElement, consumedLength):
-        if lineElement.get("isVirtual") or consumedLength <= 0:
-            return
-        key = self.lineKey(lineElement)
-        self.lineRemainingLength[key] = self.availableLineBudget(lineElement) - consumedLength
+    # Length a straight still has, measured from its current endpoints along its own direction
+    def currentLineLength(self, lineElement):
+        endpoints = self.newLineEndpoints.get(lineElement["elemIndex"], {})
+        startXY = endpoints.get("startXY", (lineElement["startX"], lineElement["startY"]))
+        endXY = endpoints.get("endXY", (lineElement["endX"], lineElement["endY"]))
+        direction = vecNormalize(vecSub((lineElement["endX"], lineElement["endY"]),
+                                        (lineElement["startX"], lineElement["startY"])))
+        return float(vecDot(vecSub(endXY, startXY), direction))
 
-    # Cap a desired extra spiral-length consumption against what a shared Line can still give up
+    # Re-measure a straight after a group moved one of its ends. Decrementing the ledger by the
+    # spiral growth alone missed everything the radius change consumed, so the remaining length
+    # the next curve saw could be several times what was actually left on the ground.
+    def refreshLineBudget(self, lineElement):
+        if lineElement is None:
+            return
+        self.lineRemainingLength[self.lineKey(lineElement)] = self.currentLineLength(lineElement)
     def resolveSharedLine(self, remainingLength, desiredConsumption, lMinM):
         desiredConsumption = max(0.0, desiredConsumption)
         if remainingLength <= lMinM:
@@ -1918,18 +2031,20 @@ class AlignmentOptimizer:
     def effectiveArcFloorM(self):
         return min(self.lMinM, self.baselineArcLengthM)
 
-    # Remaining length of one bounding straight once the curve's tangent point has moved onto it
+    # Remaining length of one bounding straight once the curve's tangent point has moved onto it.
+    # Signed along the straight's own direction: a tangent point that has run past the far end
+    # gives a negative length, which np.hypot used to report as a perfectly healthy positive one.
     def straightLengthAfter(self, lineElement, tangentPoint, isLineBefore):
-        if lineElement is None or lineElement.get("isVirtual"):
+        if lineElement is None:
             return np.inf
         endpoints = self.newLineEndpoints.get(lineElement["elemIndex"], {})
+        direction = vecNormalize(vecSub((lineElement["endX"], lineElement["endY"]),
+                                        (lineElement["startX"], lineElement["startY"])))
         if isLineBefore:
             fixedPoint = endpoints.get("startXY", (lineElement["startX"], lineElement["startY"]))
-        else:
-            fixedPoint = endpoints.get("endXY", (lineElement["endX"], lineElement["endY"]))
-        return float(np.hypot(tangentPoint[0] - fixedPoint[0], tangentPoint[1] - fixedPoint[1]))
-
-    # Both bounding straights must still hold L_min for the sub L_min arc relaxation to apply
+            return float(vecDot(vecSub(tangentPoint, fixedPoint), direction))
+        fixedPoint = endpoints.get("endXY", (lineElement["endX"], lineElement["endY"]))
+        return float(vecDot(vecSub(fixedPoint, tangentPoint), direction))
     def boundingStraightsKeepReserve(self, geometry):
         candidates = ((self.straightLengthAfter(self.groupLineBefore, geometry["ts"], True),
                        self.baselineEntryStraightM),
@@ -1945,13 +2060,34 @@ class AlignmentOptimizer:
                 self.wasRelaxationBlockedByTangent = True
         return isSupported
 
+    # Smallest length a bounding straight may keep. Normally L_min, but a straight that was
+    # already shorter than that only has to avoid being made worse by this group.
+    def straightFloorM(self, baselineLengthM):
+        return min(self.lMinM, baselineLengthM)
+
+    # Every candidate has to leave both bounding straights standing, whatever the arc does.
+    # Growing a radius migrates both tangent points outward by roughly dR*tan(delta/2), which
+    # was previously neither charged to the shared budget nor gated, so a 30 m straight could
+    # be eaten down to 7 m and a 12 m one folded through itself into an element overlap.
+    def boundingStraightsSurvive(self, geometry):
+        candidates = ((self.straightLengthAfter(self.groupLineBefore, geometry["ts"], True),
+                       self.baselineEntryStraightM),
+                      (self.straightLengthAfter(self.groupLineAfter, geometry["st"], False),
+                       self.baselineExitStraightM))
+        for candidateLengthM, baselineLengthM in candidates:
+            if not np.isfinite(candidateLengthM):
+                continue
+            if candidateLengthM < self.straightFloorM(baselineLengthM) - STRAIGHT_LENGTH_EPSILON_M:
+                return False
+        return True
+
     # Geometry aware half of the gate, only a relaxed arc has to prove the straights still fit
     def isCandidateSupported(self, frame, radius, entryLength, exitLength, geometry):
+        if not self.boundingStraightsSurvive(geometry):
+            return False
         if self.arcLengthFor(frame, radius, entryLength, exitLength) >= self.lMinM:
             return True
         return self.boundingStraightsKeepReserve(geometry)
-
-    # Envelope exhaustion and a blocked relaxation look the same to the search, so they are named apart
     def exhaustionReason(self):
         return "optSkipShortTangent" if self.wasRelaxationBlockedByTangent else "optSkipEnvelopeExhausted"
 
@@ -1996,27 +2132,25 @@ class AlignmentOptimizer:
         return max(ownLength, min(byBudget, byArc, self.lkMaxM))
 
     # Transition lengths that keep the spiral angle L/(2R) of the imported curve at a new radius
-    def coupledSpiralLengths(self, R0, L0entry, L0exit, radius, entryBudget, exitBudget, allowEntry, allowExit):
+    def coupledSpiralLengths(self, R0, L0entry, L0exit, radius, entryBudget, exitBudget):
         scale = radius / R0 if R0 > 0 else 1.0
         Lentry, Lexit = L0entry, L0exit
 
-        if allowEntry and L0entry > 0:
+        if L0entry > 0:
             Lentry = min(max(L0entry * scale, L0entry), self.lkMaxM)
             Lentry = L0entry + self.resolveSharedLine(entryBudget, Lentry - L0entry, self.lMinM)
-        if allowExit and L0exit > 0:
+        if L0exit > 0:
             Lexit = min(max(L0exit * scale, L0exit), self.lkMaxM)
             Lexit = L0exit + self.resolveSharedLine(exitBudget, Lexit - L0exit, self.lMinM)
 
         return Lentry, Lexit
-
-    def solveShiftAndExtend(self, frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget, allowEntry, allowExit):
+    def solveShiftAndExtend(self, frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget):
         # Solving the radius first would spend the whole envelope before the clothoids were looked at,
         # which is why this mode used to collapse onto mode 3. Radius and transitions therefore grow
         # together off one parameter, holding the spiral angle constant, and a capped transition
         # simply leaves the remaining envelope to the radius alone.
         def candidateAt(radius):
-            return self.coupledSpiralLengths(R0, L0entry, L0exit, radius,
-                                             entryBudget, exitBudget, allowEntry, allowExit)
+            return self.coupledSpiralLengths(R0, L0entry, L0exit, radius, entryBudget, exitBudget)
 
         def isFeasible(radius):
             if not self.isRadiusWithinCeiling(radius):
@@ -2049,52 +2183,48 @@ class AlignmentOptimizer:
             return {"feasible": False, "reason": self.exhaustionReason()}
 
         return {"feasible": True, "Rnew": Rnew, "Lentry": Lentry, "Lexit": Lexit}
-
-    def solveExtendSpirals(self, frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget, allowEntry, allowExit):
+    def solveExtendSpirals(self, frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget):
         if L0entry <= 0 or L0exit <= 0:
             return {"feasible": False, "reason": "optSkipNoSpirals"}
 
         Lentry, Lexit = L0entry, L0exit
 
-        if allowEntry:
-            def isFeasibleEntry(L):
-                if L > self.lkMaxM:
-                    return False
-                if not self.isArcLengthAcceptable(frame, R0, L, Lexit):
-                    return False
-                if self.resolveSharedLine(entryBudget, L - L0entry, self.lMinM) < L - L0entry - 1e-6:
-                    return False
-                geometry = self.buildCandidateGeometry(frame, R0, L, Lexit)
-                if geometry is None:
-                    return False
-                if not self.isCandidateSupported(frame, R0, L, Lexit, geometry):
-                    return False
-                return self.evaluateSlew(baselineAxis, geometry["samplePoints"]) <= self.dMaxM
-            ceiling = self.spiralLengthCeiling(frame, R0, L0entry, Lexit, entryBudget)
-            Lentry, _ = self.refineWithinBracket(isFeasibleEntry, L0entry, ceiling, max(1.0, L0entry*0.2))
+        def isFeasibleEntry(L):
+            if L > self.lkMaxM:
+                return False
+            if not self.isArcLengthAcceptable(frame, R0, L, Lexit):
+                return False
+            if self.resolveSharedLine(entryBudget, L - L0entry, self.lMinM) < L - L0entry - 1e-6:
+                return False
+            geometry = self.buildCandidateGeometry(frame, R0, L, Lexit)
+            if geometry is None:
+                return False
+            if not self.isCandidateSupported(frame, R0, L, Lexit, geometry):
+                return False
+            return self.evaluateSlew(baselineAxis, geometry["samplePoints"]) <= self.dMaxM
+        ceiling = self.spiralLengthCeiling(frame, R0, L0entry, Lexit, entryBudget)
+        Lentry, _ = self.refineWithinBracket(isFeasibleEntry, L0entry, ceiling, max(1.0, L0entry*0.2))
 
-        if allowExit:
-            def isFeasibleExit(L):
-                if L > self.lkMaxM:
-                    return False
-                if not self.isArcLengthAcceptable(frame, R0, Lentry, L):
-                    return False
-                if self.resolveSharedLine(exitBudget, L - L0exit, self.lMinM) < L - L0exit - 1e-6:
-                    return False
-                geometry = self.buildCandidateGeometry(frame, R0, Lentry, L)
-                if geometry is None:
-                    return False
-                if not self.isCandidateSupported(frame, R0, Lentry, L, geometry):
-                    return False
-                return self.evaluateSlew(baselineAxis, geometry["samplePoints"]) <= self.dMaxM
-            ceiling = self.spiralLengthCeiling(frame, R0, L0exit, Lentry, exitBudget)
-            Lexit, _ = self.refineWithinBracket(isFeasibleExit, L0exit, ceiling, max(1.0, L0exit*0.2))
+        def isFeasibleExit(L):
+            if L > self.lkMaxM:
+                return False
+            if not self.isArcLengthAcceptable(frame, R0, Lentry, L):
+                return False
+            if self.resolveSharedLine(exitBudget, L - L0exit, self.lMinM) < L - L0exit - 1e-6:
+                return False
+            geometry = self.buildCandidateGeometry(frame, R0, Lentry, L)
+            if geometry is None:
+                return False
+            if not self.isCandidateSupported(frame, R0, Lentry, L, geometry):
+                return False
+            return self.evaluateSlew(baselineAxis, geometry["samplePoints"]) <= self.dMaxM
+        ceiling = self.spiralLengthCeiling(frame, R0, L0exit, Lentry, exitBudget)
+        Lexit, _ = self.refineWithinBracket(isFeasibleExit, L0exit, ceiling, max(1.0, L0exit*0.2))
 
         if Lentry - L0entry < 0.01 and Lexit - L0exit < 0.01:
             return {"feasible": False, "reason": self.exhaustionReason()}
         return {"feasible": True, "Rnew": R0, "Lentry": Lentry, "Lexit": Lexit}
-
-    def solveInvertedShift(self, frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget, allowEntry, allowExit):
+    def solveInvertedShift(self, frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget):
         if L0entry <= 0 or L0exit <= 0:
             return {"feasible": False, "reason": "optSkipNoSpirals"}
 
@@ -2105,12 +2235,10 @@ class AlignmentOptimizer:
         # Bracket bound only, the strict slew check below is what actually enforces d_max
         def candidateAt(s):
             Rnew = max(Rfloor, R0 - s)
-            Lentry = float(np.sqrt(max(0.0, 24.0*Rnew*(deltaR0entry + 2.0*s)))) if allowEntry else L0entry
-            Lexit = float(np.sqrt(max(0.0, 24.0*Rnew*(deltaR0exit + 2.0*s)))) if allowExit else L0exit
-            if allowEntry:
-                Lentry = min(Lentry, L0entry + self.resolveSharedLine(entryBudget, Lentry - L0entry, self.lMinM))
-            if allowExit:
-                Lexit = min(Lexit, L0exit + self.resolveSharedLine(exitBudget, Lexit - L0exit, self.lMinM))
+            Lentry = float(np.sqrt(max(0.0, 24.0*Rnew*(deltaR0entry + 2.0*s))))
+            Lexit = float(np.sqrt(max(0.0, 24.0*Rnew*(deltaR0exit + 2.0*s))))
+            Lentry = min(Lentry, L0entry + self.resolveSharedLine(entryBudget, Lentry - L0entry, self.lMinM))
+            Lexit = min(Lexit, L0exit + self.resolveSharedLine(exitBudget, Lexit - L0exit, self.lMinM))
             # A transition never grows past the configured ceiling, whatever the envelope still allows
             return Rnew, min(Lentry, max(L0entry, self.lkMaxM)), min(Lexit, max(L0exit, self.lkMaxM))
 
@@ -2132,8 +2260,6 @@ class AlignmentOptimizer:
 
         Rnew, Lentry, Lexit = candidateAt(sMax)
         return {"feasible": True, "Rnew": Rnew, "Lentry": Lentry, "Lexit": Lexit}
-
-    # Envelope split between the arc radius and the transitions, as a pair of shares in metres
     def allocationBudgets(self):
         ratioC = min(100.0, max(0.0, self.ratioCPercent))
         return self.dMaxM * ratioC / 100.0, self.dMaxM * (100.0 - ratioC) / 100.0
@@ -2144,7 +2270,7 @@ class AlignmentOptimizer:
             return 0.0
         return float(np.sqrt(24.0 * radius * shiftM))
 
-    def solveRatioAllocation(self, frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget, allowEntry, allowExit):
+    def solveRatioAllocation(self, frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget):
         if L0entry <= 0 or L0exit <= 0:
             return {"feasible": False, "reason": "optSkipNoSpirals"}
 
@@ -2183,15 +2309,12 @@ class AlignmentOptimizer:
 
         # Both transitions grow off one tangent offset increment, so a symmetric curve stays symmetric
         def lengthsForShift(shiftM):
-            entryLength, exitLength = L0entry, L0exit
-            if allowEntry:
-                entryLength = max(L0entry, self.spiralLengthForShift(Rnew, deltaREntry + shiftM))
-                entryLength = min(entryLength, self.lkMaxM)
-                entryLength = L0entry + self.resolveSharedLine(entryBudget, entryLength - L0entry, self.lMinM)
-            if allowExit:
-                exitLength = max(L0exit, self.spiralLengthForShift(Rnew, deltaRExit + shiftM))
-                exitLength = min(exitLength, self.lkMaxM)
-                exitLength = L0exit + self.resolveSharedLine(exitBudget, exitLength - L0exit, self.lMinM)
+            entryLength = max(L0entry, self.spiralLengthForShift(Rnew, deltaREntry + shiftM))
+            entryLength = min(entryLength, self.lkMaxM)
+            entryLength = L0entry + self.resolveSharedLine(entryBudget, entryLength - L0entry, self.lMinM)
+            exitLength = max(L0exit, self.spiralLengthForShift(Rnew, deltaRExit + shiftM))
+            exitLength = min(exitLength, self.lkMaxM)
+            exitLength = L0exit + self.resolveSharedLine(exitBudget, exitLength - L0exit, self.lMinM)
             return entryLength, exitLength
 
         # The envelope is the hard gate here, the ratio only steered where the search started
@@ -2207,7 +2330,7 @@ class AlignmentOptimizer:
             return self.evaluateSlew(baselineAxis, geometry["samplePoints"]) <= self.dMaxM
 
         Lentry, Lexit = L0entry, L0exit
-        if spiralBudgetM > 0 and (allowEntry or allowExit):
+        if spiralBudgetM > 0:
             # Backing off inside the bracket keeps the transitions growing when the pair overshoots d_max
             usedShiftM, _ = self.refineWithinBracket(
                 isShiftFeasible, 0.0, spiralBudgetM, max(0.01, spiralBudgetM * 0.2))
@@ -2219,7 +2342,7 @@ class AlignmentOptimizer:
 
     # --- Group solve orchestration and output emission ---
 
-    def solveGroup(self, startIdx, endIdx, patternType, mode, lineBefore, lineAfter, runElements, allowExtendEntry=True, allowExtendExit=True):
+    def solveGroup(self, startIdx, endIdx, patternType, mode, lineBefore, lineAfter, runElements):
         try:
             frame = self.buildFixedFrame(lineBefore, lineAfter)
         except OptimizerGeometryError:
@@ -2237,11 +2360,14 @@ class AlignmentOptimizer:
         L0exit = float(exitSpiral["length"]) if exitSpiral else 0.0
 
         baselineAxis = self.sampleBaselineAxis(lineBefore, entrySpiral, arcElement, exitSpiral, lineAfter, frame, R0, L0entry, L0exit)
-        entryBudget = self.availableLineBudget(lineBefore) if allowExtendEntry else 0.0
-        exitBudget = self.availableLineBudget(lineAfter) if allowExtendExit else 0.0
+        entryBudget = self.availableLineBudget(lineBefore)
+        exitBudget = self.availableLineBudget(lineAfter)
 
-        # Gates below compare against this group's own baseline, so prime it before any candidate runs
-        self.baselineArcLengthM = self.arcLengthBaseline(arcElement)
+        # Gates below compare against this group's own baseline, so prime it before any candidate
+        # runs. It is the closed form arc length of the imported radius and transitions, not the
+        # imported stationing: mixing the two let two millimetres of rounding in the file decide
+        # whether a short arc was allowed to be improved at all.
+        self.baselineArcLengthM = self.arcLengthFor(frame, R0, L0entry, L0exit)
         self.groupLineBefore = lineBefore
         self.groupLineAfter = lineAfter
         self.baselineEntryStraightM = self.availableLineBudget(lineBefore)
@@ -2251,13 +2377,13 @@ class AlignmentOptimizer:
         if mode == OPTIMIZATION_MODE_SHIFT_ARC:
             result = self.solveShiftArc(frame, R0, L0entry, L0exit, baselineAxis)
         elif mode == OPTIMIZATION_MODE_SHIFT_AND_EXTEND:
-            result = self.solveShiftAndExtend(frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget, allowExtendEntry, allowExtendExit)
+            result = self.solveShiftAndExtend(frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget)
         elif mode == OPTIMIZATION_MODE_EXTEND_SPIRALS:
-            result = self.solveExtendSpirals(frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget, allowExtendEntry, allowExtendExit)
+            result = self.solveExtendSpirals(frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget)
         elif mode == OPTIMIZATION_MODE_INVERTED_SHIFT:
-            result = self.solveInvertedShift(frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget, allowExtendEntry, allowExtendExit)
+            result = self.solveInvertedShift(frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget)
         elif mode == OPTIMIZATION_MODE_RATIO_ALLOCATION:
-            result = self.solveRatioAllocation(frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget, allowExtendEntry, allowExtendExit)
+            result = self.solveRatioAllocation(frame, R0, L0entry, L0exit, baselineAxis, entryBudget, exitBudget)
         else:
             result = {"feasible": False, "reason": "optSkipPatternDisabled"}
 
@@ -2275,11 +2401,6 @@ class AlignmentOptimizer:
         if slewMax > self.dMaxM + 1e-3:
             self.recordSkip(startIdx, endIdx, patternType, "optWarnEnvelopeExceeded")
             return
-
-        if allowExtendEntry:
-            self.consumeLine(lineBefore, max(0.0, Lentry - L0entry))
-        if allowExtendExit:
-            self.consumeLine(lineAfter, max(0.0, Lexit - L0exit))
 
         self.emitGroup(startIdx, endIdx, patternType, mode, lineBefore, lineAfter,
                         entrySpiral, arcElement, exitSpiral, geometry, R0, Rnew, L0entry, Lentry, L0exit, Lexit, slewMax,
@@ -2300,8 +2421,6 @@ class AlignmentOptimizer:
         }
 
     def updateLineEndpoint(self, lineElement, updateStart, newPoint):
-        if lineElement.get("isVirtual"):
-            return
         entry = self.newLineEndpoints.setdefault(lineElement["elemIndex"], {})
         if updateStart:
             entry["startXY"] = newPoint
@@ -2352,6 +2471,10 @@ class AlignmentOptimizer:
 
         self.updateLineEndpoint(lineBefore, updateStart=False, newPoint=geometry["ts"])
         self.updateLineEndpoint(lineAfter, updateStart=True, newPoint=geometry["st"])
+        # Both straights are re-measured from their new endpoints, so the next curve along
+        # sees what is genuinely left rather than a ledger that only tracked spiral growth
+        self.refreshLineBudget(lineBefore)
+        self.refreshLineBudget(lineAfter)
 
         lengthDelta = (Lentry - L0entry) + (Lexit - L0exit) + (geometry["arcLength"] - self.arcLengthBaseline(arcElement))
         # Samples are recorded as a fraction of the group so re-chaining can place them afterwards
@@ -2369,6 +2492,9 @@ class AlignmentOptimizer:
             "slewPeakFraction": float(slewPeakFraction),
             "startKm": float(groupStartStation), "endKm": float(exitEndStation), "status": "optOk",
             "radiusOldM": float(R0), "radiusNewM": float(Rnew),
+            # True when the radius ceiling stopped the search before the slew envelope did
+            "isRadiusCeilingBound": bool(self.rMaxM is not None
+                                         and Rnew >= self.rMaxM - RADIUS_CEILING_EPSILON_M),
             "spiralLengthsOldM": [float(L0entry), float(L0exit)], "spiralLengthsNewM": [float(Lentry), float(Lexit)],
             "offsetOldM": float(self.clothoidShiftAndFoot(L0entry, R0)[1]), "offsetNewM": float(geometry["deltaREntry"]),
             "slewMaxM": float(reportedSlewM), "slewPeakSignedMm": float(slewPeakMm),
@@ -2400,6 +2526,8 @@ class AlignmentOptimizer:
             "maxSlewM": float(max(slews)) if slews else 0.0,
             "meanSlewM": float(sum(slews)/len(slews)) if slews else 0.0,
             "optimizedGroupCount": len(optimizedGroups),
+            "radiusCeilingBoundCount": sum(1 for group in optimizedGroups
+                                           if group.get("isRadiusCeilingBound")),
             "skippedGroupCount": len(self.summaryGroups) - len(optimizedGroups),
             "evaluatedLengthKm": evaluatedLengthKm,
             "shiftedLengthKm": shiftedLengthKm,
@@ -2409,6 +2537,9 @@ class AlignmentOptimizer:
             "slewProfileStationKm": profile["slewProfileStationKm"],
             "slewProfileOffsetMm": profile["slewProfileOffsetMm"],
             "timingMs": dict(self.timingMs),
+            # True when an element length had to be clamped at zero, which means a straight was
+            # consumed past its own start. Reported rather than silently absorbed.
+            "hasClampedChainage": bool(self.hasClampedChainage),
             "groups": self.summaryGroups,
         }
 
@@ -2521,4 +2652,6 @@ class AlignmentOptimizer:
             "curveStationStart": np.array(curveStationStart), "curveRadius": np.array(curveRadius),
             "curveRot": np.array(curveRot),
             "stationHorizontal": np.array(self.stationHorizontalNewList),
+            # Carried so alignmentCoordinates can address elements rather than guess by chainage
+            "geometryType": np.array(list(self.lxml.get("geometryType", []))),
         }

@@ -188,6 +188,10 @@ class BatchConfigStore:
                 problems.append("batchProblemInvalidSweepStep")
             if float(sweepConfig.get("minValue", 0)) > float(sweepConfig.get("maxValue", 0)):
                 problems.append("batchProblemInvalidSweepRange")
+            # The geometry engine cannot converge on a non positive iteration step
+            if (sweepConfig.get("paramKey") == "iterationStep"
+                    and float(sweepConfig.get("minValue", 0)) <= 0):
+                problems.append("batchProblemInvalidSweepRange")
 
         for scenario in configData.get("optimizationScenarios") or []:
             if not scenario.get("isEnabled", True):

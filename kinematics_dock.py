@@ -3,6 +3,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
 
+import batch_metrics
 import plot_widgets
 from plot_widgets import CoypuPlotWidget
 
@@ -222,18 +223,16 @@ class KinematicsPlotWidget(CoypuPlotWidget):
     # Draw the scheduled stop indicators on the three plots that can show them
     def drawStopMarkers(self, dataStorage, vehicleCount, vehiclesSettings,
                         distanceFactor, timeFactor):
-        trainStops = dataStorage.get("settingsData", {}).get("trainStops", [])
+        # After an optimization the engine runs against projected chainages, so the markers
+        # read the same list the travel times do rather than the raw timetable entries
+        trainStops = batch_metrics.stopsList(dataStorage)
         if not trainStops or not self.showStationMarkers:
             return
 
         foreground = self.tokens["plotForeground"] if self.tokens else "#1c1c1c"
 
-        for stop in trainStops:
-            try:
-                stationMetres = float(stop[0]) * 1000.0
-                stopName = str(stop[2]) if len(stop) > 2 else ""
-            except (IndexError, ValueError, TypeError):
-                continue
+        for stationKm, dwellSeconds, stopName in trainStops:
+            stationMetres = stationKm * 1000.0
 
             self.addStopMarker(self.plotTachoTrack, stationMetres / distanceFactor,
                                angle=90, color="#8a8a8a", label=stopName,
