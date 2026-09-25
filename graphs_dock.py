@@ -3,6 +3,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 
 from plot_widgets import CoypuPlotWidget
+import geometry_engine
 import profile_state
 
 # Cant and cant deficiency curves drawn on the left axis of the geometry plot
@@ -24,6 +25,9 @@ CURVATURE_SERIES = [
     ("curvatureBaseline", "stationHorizontalBaseline", "curvatureBaseline", "curvature_baseline"),
     ("curvature", "stationHorizontal", "curvature", "curvature"),
 ]
+
+# Station keys still on the imported chainage, projected onto the active one before plotting
+BASELINE_STATION_KEYS = ("stationHorizontalBaseline",)
 
 # Speed limit step curves drawn on the middle plot, always the active alignment only
 SPEED_SERIES = [
@@ -153,6 +157,10 @@ class PerformanceGraphsWidget(CoypuPlotWidget):
             values = lxml.get(valueKey)
             if not (self.hasData(stations) and self.hasData(values)):
                 continue
+            # Plotted on its own chainage the imported curve drifted off by the length every
+            # reshaped curve gave up, so both curves are drawn where they stand on the ground
+            if stationKey in BASELINE_STATION_KEYS:
+                stations = geometry_engine.projectChainageKmArray(lxml, stations)
             self.setSeriesData("geometry", seriesKey, stations, values,
                                name=self.lan.get(labelKey, labelKey), onRight=True,
                                isVisible=visibility.get(seriesKey, True))

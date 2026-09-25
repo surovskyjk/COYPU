@@ -21,12 +21,15 @@ class SourceStack:
     def __init__(self):
         self.entries = []
         self.nextId = 1
+        # Bumped on every change, so anything derived from the imports can tell it went stale
+        self.revision = 0
 
     # Record one resolved import and return the entry created for it
     def addEntry(self, kind, fileName, payload, stationStart, stationEnd, rawText=""):
         entry = SourceEntry(self.nextId, kind, fileName, payload, stationStart, stationEnd, rawText)
         self.entries.append(entry)
         self.nextId += 1
+        self.revision += 1
         return entry
 
     # Entries of one kind, in the order they were imported
@@ -36,11 +39,14 @@ class SourceStack:
     # Drop a single entry by id, used by the segment manager
     def removeEntry(self, sourceId):
         self.entries = [entry for entry in self.entries if entry.sourceId != sourceId]
+        self.revision += 1
 
     # Drop every entry of one kind
     def clearKind(self, kind):
         self.entries = [entry for entry in self.entries if entry.kind != kind]
+        self.revision += 1
 
     # Drop every entry, used by a complete project reset
     def clearAll(self):
         self.entries = []
+        self.revision += 1

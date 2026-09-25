@@ -1337,15 +1337,21 @@ def projectChainageArrays(landXml):
 
 # Map a chainage from the imported alignment onto the active one, identity while nothing moved
 def projectChainageKm(lxml, stationKm):
+    return float(projectChainageKmArray(lxml, [stationKm])[0])
+
+
+# Array form of projectChainageKm, for whole station arrays such as the imported curvature
+def projectChainageKmArray(lxml, stationsKm):
+    stationsKm = np.asarray(stationsKm, dtype=float)
     baselineKm = (lxml or {}).get("chainageMapBaselineKm")
     activeKm = (lxml or {}).get("chainageMapActiveKm")
     if baselineKm is None or activeKm is None:
-        return float(stationKm)
+        return stationsKm.copy()
     baselineKm = np.asarray(baselineKm, dtype=float)
     activeKm = np.asarray(activeKm, dtype=float)
     if baselineKm.size < 2 or baselineKm.size != activeKm.size:
-        return float(stationKm)
-    return float(np.interp(float(stationKm), baselineKm, activeKm))
+        return stationsKm.copy()
+    return np.interp(stationsKm, baselineKm, activeKm)
 
 
 class AlignmentOptimizer:
@@ -1828,15 +1834,23 @@ class AlignmentOptimizer:
             resolved.append((group["startKm"] + fraction * spanKm, offsetMm))
         self.slewSamples = resolved
 
-    # Monotone piecewise linear map from baseline chainage onto the re-chained active alignment
+    # Monotone piecewise linear map from baseline chainage onto the re-chained active alignment.
+    # Nodes sit only where both axes share the same ground, the stretch of every straight neither
+    # curve consumed. Pairing element ends instead dragged anything surveyed near a reshaped
+    # curve along with its transitions, tens of metres off where it actually stands.
     def buildChainageMap(self):
         mapBaselineKm, mapActiveKm = [], []
         nodes = [(float(self.elements[0]["staStart"]), float(self.elementStationsKm[0][0]))]
         for k, element in enumerate(self.elements):
-            nodes.append((float(element["staEnd"]), float(self.elementStationsKm[k][1])))
+            if element["type"] == "Line":
+                nodes.extend(self.sharedStraightNodes(k, element))
+        nodes.append((float(self.elements[-1]["staEnd"]), float(self.elementStationsKm[-1][1])))
 
         for baselineStationKm, activeStationKm in nodes:
-            # Zero length elements share a node, so the later value simply replaces the earlier one
+            # A node a moved curve pushed behind its predecessor carries no information
+            if mapActiveKm and activeStationKm < mapActiveKm[-1]:
+                continue
+            # Coincident nodes share one station, so the later value simply replaces the earlier one
             if mapBaselineKm and baselineStationKm <= mapBaselineKm[-1] + CHAINAGE_EPSILON_KM:
                 mapBaselineKm[-1] = baselineStationKm
                 mapActiveKm[-1] = activeStationKm
@@ -1845,6 +1859,33 @@ class AlignmentOptimizer:
             mapActiveKm.append(activeStationKm)
 
         return (np.array(mapBaselineKm, dtype=float), np.array(mapActiveKm, dtype=float))
+
+    # Baseline and active chainage of both ends of the part of a straight that neither
+    # neighbouring curve consumed, the stretch where the two axes still run on the same ground
+    def sharedStraightNodes(self, k, lineElement):
+        startXY = (lineElement["startX"], lineElement["startY"])
+        endXY = (lineElement["endX"], lineElement["endY"])
+        lengthM = self.lineBaselineLength(lineElement)
+        if lengthM <= STRAIGHT_LENGTH_EPSILON_M:
+            return []
+
+        direction = vecNormalize(vecSub(endXY, startXY))
+        endpoints = self.newLineEndpoints.get(k, {})
+        startShiftM = vecDot(vecSub(endpoints.get("startXY", startXY), startXY), direction)
+        endShiftM = vecDot(vecSub(endpoints.get("endXY", endXY), endXY), direction)
+        activeLengthM = lengthM + endShiftM - startShiftM
+        sharedFromM = max(0.0, startShiftM)
+        sharedToM = lengthM + min(0.0, endShiftM)
+        if activeLengthM <= STRAIGHT_LENGTH_EPSILON_M or sharedToM - sharedFromM <= STRAIGHT_LENGTH_EPSILON_M:
+            return []
+
+        # Each axis is read against its own stationing, which can differ from the drawn length
+        # by the rounding in the file or by a seam the merge clamped
+        baselineStartKm, baselineEndKm = float(lineElement["staStart"]), float(lineElement["staEnd"])
+        activeStartKm, activeEndKm = self.elementStationsKm[k]
+        return [(baselineStartKm + (baselineEndKm - baselineStartKm) * distanceM / lengthM,
+                 activeStartKm + (activeEndKm - activeStartKm) * (distanceM - startShiftM) / activeLengthM)
+                for distanceM in (sharedFromM, sharedToM)]
 
     # Full chainage span of the imported alignment, the denominator of the shifted length share
     def evaluatedLengthKm(self):

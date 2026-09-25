@@ -31,7 +31,7 @@ from theme_manager import ThemeManager
 from lazy_dock import LazyDockWidget
 from ribbon import RibbonBar, SERIES_TOGGLE_PROPERTY, DESTRUCTIVE_BUTTON_PROPERTY, COMPACT_ICON_SIZE
 from workflow_dock import WorkflowStepperWidget
-from graphs_dock import PerformanceGraphsWidget
+from graphs_dock import PerformanceGraphsWidget, BASELINE_STATION_KEYS
 from profile_dock import ProfilePlotWidget
 from kinematics_dock import KinematicsPlotWidget
 from help_dock import HelpWidget
@@ -169,6 +169,9 @@ BASELINE_COMPARISON_KEYS = ("stationHorizontal", "curvature", "alignmentCoordina
 
 # Suffix marking a baseline copy, never cleared by a recalculation
 BASELINE_KEY_SUFFIX = "Baseline"
+
+# Bookkeeping entries of the baseline cache, never copied back into the data storage
+BASELINE_CACHE_META_KEYS = ("LandXML", "runSignature", "sourceRevision", "hasBaselineResults")
 
 # Optimizer provenance describing the geometry change itself, not a cant or speed result
 OPTIMIZATION_STATE_KEYS = ("optimizationSummary", "slewProfileStationKm", "slewProfileOffsetMm",
@@ -2262,11 +2265,24 @@ class MainWindow(QMainWindow):
         self.mergeLandXMLData(newLandXMLData)
 
     def mergeLandXMLData(self, newData):
-        oldData = self.dataStorage.get("LandXML", {})
-        
         if len(newData.get("stationHorizontal", [])) == 0:
             return
-            
+
+        mergedData = self.mergedLandXmlData(self.dataStorage.get("LandXML", {}), newData)
+        self.dataStorage["LandXML"] = mergedData
+        self.updateTableLandXML(mergedData)
+
+        self.cleanCalculatedCants()
+        self.cleanCalculatedSpeeds()
+
+        self.plotCant()
+        self.plotCurvature()
+        self.plotProfile()
+        self.mapWidget.drawAlignment(mergedData.get("alignmentCoordinates",[]), mergedData)
+
+    # Overlap merge of one parsed segment onto an alignment, touching neither the storage nor the
+    # views, so the imported alignment can also be replayed silently from the source stack
+    def mergedLandXmlData(self, oldData, newData, warnOnGap=True):
         oldStart = np.nanmin(oldData["stationHorizontal"])
         oldEnd = np.nanmax(oldData["stationHorizontal"])
         newStart = np.nanmin(newData["stationHorizontal"])
@@ -2282,7 +2298,7 @@ class MainWindow(QMainWindow):
                     oldLastX, oldLastY = oldData["keyX"][-1], oldData["keyY"][-1]
                     newFirstX, newFirstY = newData["keyX"][0], newData["keyY"][0]
                     dist = np.sqrt((newFirstX - oldLastX)**2 + (newFirstY - oldLastY)**2)
-                    if dist > 100:
+                    if dist > 100 and warnOnGap:
                         QMessageBox.warning(self, lan.get("merge_gap_warning_title", "Warning"), lan.get("merge_gap_warning_desc", "Gap > 100m"))
         else:
             isAppend = False
@@ -2292,7 +2308,7 @@ class MainWindow(QMainWindow):
                     oldFirstX, oldFirstY = oldData["keyX"][0], oldData["keyY"][0]
                     newLastX, newLastY = newData["keyX"][-1], newData["keyY"][-1]
                     dist = np.sqrt((newLastX - oldFirstX)**2 + (newLastY - oldFirstY)**2)
-                    if dist > 100:
+                    if dist > 100 and warnOnGap:
                         QMessageBox.warning(self, lan.get("merge_gap_warning_title", "Warning"), lan.get("merge_gap_warning_desc", "Gap > 100m"))
 
         stationMap = {
@@ -2402,16 +2418,7 @@ class MainWindow(QMainWindow):
             valid = deltaX != 0
             mergedData["slope"][valid] = deltaZ[valid] / deltaX[valid]
 
-        self.dataStorage["LandXML"] = mergedData
-        self.updateTableLandXML(mergedData)
-
-        self.cleanCalculatedCants()
-        self.cleanCalculatedSpeeds()
-        
-        self.plotCant()
-        self.plotCurvature()
-        self.plotProfile()
-        self.mapWidget.drawAlignment(mergedData.get("alignmentCoordinates",[]), mergedData)
+        return mergedData
 
     # Cache one imported LandXML file's resolved contribution, enables a later selective purge
     def recordLandXMLSource(self, fileName, landXmlData, rawText=""):
@@ -2452,7 +2459,7 @@ class MainWindow(QMainWindow):
         self.textboxRawTTP.setXmlText("\n".join(lines))
 
     # Merge two resolved TTP arrays, the gap detection mirrors a live TTP import
-    def mergeTtpArrays(self, oldStations, oldSpeeds, newStations, newSpeeds):
+    def mergeTtpArrays(self, oldStations, oldSpeeds, newStations, newSpeeds, warnOnGap=True):
         lan = self.translationManager.getLanguage(self.currentLanguage)
         oldStart = np.nanmin(oldStations)
         oldEnd = np.nanmax(oldStations)
@@ -2462,13 +2469,13 @@ class MainWindow(QMainWindow):
         if newStart >= oldEnd or (abs(newStart - oldEnd) <= abs(newEnd - oldStart)):
             isAppend = True
             cropStation = oldEnd
-            if abs(newStart - oldEnd) > 0.1:
+            if abs(newStart - oldEnd) > 0.1 and warnOnGap:
                 QMessageBox.warning(self, lan.get("merge_gap_warning_title", "Warning"),
                                     lan.get("merge_gap_warning_desc", "Gap > 100m"))
         else:
             isAppend = False
             cropStation = oldStart
-            if abs(oldStart - newEnd) > 0.1:
+            if abs(oldStart - newEnd) > 0.1 and warnOnGap:
                 QMessageBox.warning(self, lan.get("merge_gap_warning_title", "Warning"),
                                     lan.get("merge_gap_warning_desc", "Gap > 100m"))
 
@@ -2483,17 +2490,36 @@ class MainWindow(QMainWindow):
 
         return mergedStations, mergedSpeeds
 
+    # Imported alignment replayed from every surviving source stack entry, None without any entry
+    def importedLandXmlFromSources(self, warnOnGap=False):
+        mergedData = None
+        for entry in self.sourceStack.entriesForKind(source_stack.LANDXML_KIND):
+            payload = copy.deepcopy(entry.payload)
+            if mergedData is None:
+                mergedData = payload
+            elif len(payload.get("stationHorizontal", [])) > 0:
+                mergedData = self.mergedLandXmlData(mergedData, payload, warnOnGap)
+        return mergedData
+
+    # Imported TTP arrays replayed from every surviving source stack entry, None without any entry
+    def importedTtpFromSources(self, warnOnGap=False):
+        entries = self.sourceStack.entriesForKind(source_stack.TTP_KIND)
+        if not entries:
+            return None
+
+        mergedStations, mergedSpeeds = entries[0].payload
+        mergedStations = np.array(mergedStations, dtype=float)
+        mergedSpeeds = np.array(mergedSpeeds, dtype=float)
+        for entry in entries[1:]:
+            newStations, newSpeeds = entry.payload
+            mergedStations, mergedSpeeds = self.mergeTtpArrays(
+                mergedStations, mergedSpeeds,
+                np.array(newStations, dtype=float), np.array(newSpeeds, dtype=float), warnOnGap)
+        return mergedStations, mergedSpeeds
+
     # Rebuild the merged LandXML dataset by replaying every surviving source stack entry
     def rebuildLandXMLFromStack(self):
-        entries = self.sourceStack.entriesForKind(source_stack.LANDXML_KIND)
-
-        self.dataStorage["LandXML"] = {}
-        for index, entry in enumerate(entries):
-            payload = copy.deepcopy(entry.payload)
-            if index == 0:
-                self.dataStorage["LandXML"] = payload
-            else:
-                self.mergeLandXMLData(payload)
+        self.dataStorage["LandXML"] = self.importedLandXmlFromSources(warnOnGap=True) or {}
 
         lxml = self.dataStorage.get("LandXML", {})
         self.updateTableLandXML(lxml)
@@ -2507,20 +2533,8 @@ class MainWindow(QMainWindow):
 
     # Rebuild the merged TTP dataset by replaying every surviving source stack entry
     def rebuildTtpFromStack(self):
-        entries = self.sourceStack.entriesForKind(source_stack.TTP_KIND)
-
-        if not entries:
-            mergedStations = np.array([])
-            mergedSpeeds = np.array([])
-        else:
-            mergedStations, mergedSpeeds = entries[0].payload
-            mergedStations = np.array(mergedStations, dtype=float)
-            mergedSpeeds = np.array(mergedSpeeds, dtype=float)
-            for entry in entries[1:]:
-                newStations, newSpeeds = entry.payload
-                mergedStations, mergedSpeeds = self.mergeTtpArrays(
-                    mergedStations, mergedSpeeds,
-                    np.array(newStations, dtype=float), np.array(newSpeeds, dtype=float))
+        mergedStations, mergedSpeeds = (self.importedTtpFromSources(warnOnGap=True)
+                                        or (np.array([]), np.array([])))
 
         self.dataStorage["stationSpeedLimits"] = mergedStations
         self.dataStorage["speedLimits"] = mergedSpeeds
@@ -2909,6 +2923,9 @@ class MainWindow(QMainWindow):
                 x = lxml.get(sk)
                 y = lxml.get(ck)
                 if x is not None and y is not None and len(x) > 0 and len(y) > 0:
+                    # The imported curve is drawn where it stands on the active chainage
+                    if sk in BASELINE_STATION_KEYS:
+                        x = geometry_engine.projectChainageKmArray(lxml, x)
                     secondary.append(dict(x=x, y=y, label=lbl, color=col,
                                           linestyle='-', marker='o'))
 
@@ -4424,16 +4441,40 @@ class MainWindow(QMainWindow):
                                                       self.lastCalculationMode, self.epsgInput,
                                                       isGeometryOnly=True)
 
-    # One immutable deepcopy of the untouched baseline, taken before the first optimization run
+    # One immutable copy of the imported baseline, rebuilt whenever the imported sources change
     def captureBaselineAlignment(self):
-        if self.baselineAlignmentCache is not None:
+        cache = self.baselineAlignmentCache
+        if cache is not None and cache.get("sourceRevision") == self.sourceStack.revision:
             return
-        cache = {"LandXML": copy.deepcopy(self.dataStorage.get("LandXML", {}))}
+
+        # The live arrays are only the import while no optimizer run has replaced them. A reopened
+        # project carries the optimized axis in its active keys, and taking that as the baseline
+        # stacked every rerun on the previous one, re-chained stations and projected cant included.
+        lxml = self.dataStorage.get("LandXML", {})
+        isLiveImported = not any(lxml.get(key) is not None for key in OPTIMIZATION_STATE_KEYS)
+        importedLandXml = None if isLiveImported else self.importedLandXmlFromSources()
+        cache = {
+            # The live copy also keeps a cant design already run on the import
+            "LandXML": importedLandXml if importedLandXml is not None else copy.deepcopy(lxml),
+            "sourceRevision": self.sourceStack.revision,
+            # Results computed on an optimized axis are no baseline, restoring must drop them instead
+            "hasBaselineResults": isLiveImported,
+        }
+
         # Imported TTP chainages are projected onto the optimized axis, so the baseline copy has
         # to come back before another run, otherwise the projection would be applied twice
-        for storageKey in ("stationSpeedLimits", "speedLimits"):
-            if self.dataStorage.get(storageKey) is not None:
-                cache[storageKey] = copy.deepcopy(self.dataStorage[storageKey])
+        importedTtp = self.importedTtpFromSources()
+        if importedTtp is not None:
+            cache["stationSpeedLimits"], cache["speedLimits"] = importedTtp
+        else:
+            for storageKey in ("stationSpeedLimits", "speedLimits"):
+                if self.dataStorage.get(storageKey) is not None:
+                    cache[storageKey] = copy.deepcopy(self.dataStorage[storageKey])
+
+        if not isLiveImported:
+            self.baselineAlignmentCache = cache
+            return
+
         for profileSuffix in OPTIMIZED_PROFILE_SUFFIXES:
             for storageKey in (f"speedLimits{profileSuffix}", f"stationSpeed{profileSuffix}"):
                 if self.dataStorage.get(storageKey) is not None:
@@ -4463,9 +4504,12 @@ class MainWindow(QMainWindow):
     def restoreBaselineAlignmentData(self):
         if self.baselineAlignmentCache is None:
             return
+        # Speeds and kinematics of the optimized axis would otherwise outlive it on the import
+        if not self.baselineAlignmentCache.get("hasBaselineResults", True):
+            self.clearCalculatedResults()
         self.dataStorage["LandXML"] = copy.deepcopy(self.baselineAlignmentCache["LandXML"])
         for storageKey, values in self.baselineAlignmentCache.items():
-            if storageKey not in ("LandXML", "runSignature"):
+            if storageKey not in BASELINE_CACHE_META_KEYS:
                 self.dataStorage[storageKey] = copy.deepcopy(values)
 
     # The curvature plot and the map keep a muted baseline to compare the active geometry against
@@ -4695,6 +4739,8 @@ class MainWindow(QMainWindow):
     def revertToBaselineAlignment(self):
         lan = self.translationManager.getLanguage(self.currentLanguage)
 
+        # A reopened project has no cache yet, its import is rebuilt from the stored sources
+        self.captureBaselineAlignment()
         self.restoreBaselineAlignmentData()
         self.clearOptimizationResults(refresh=False)
         self.graphsWidget.clearSlewPlot()

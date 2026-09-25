@@ -161,6 +161,8 @@ The application separates three explicit, user driven phases:
    and the resulting lateral slew profile. Any cached cant, speed and kinematics results are cleared,
    because they describe geometry that no longer exists. A `Revert to Baseline` button in the
    optimization dialog, and the `Clear Optimization` ribbon command, restore the imported alignment.
+   Every run starts from the imported alignment, rebuilt from the source files stored in the project
+   when it is reopened, so running the optimizer again never stacks on a previous result.
 3. **Design cant** (D + I) on whichever alignment is currently active, then run the simulation.
 
 Only one alignment is ever *active*. The plots show a single set of cant, cant deficiency and speed
@@ -340,10 +342,12 @@ the arc grows by `ΔR · Δ` while the two tangents each give up `ΔR · tan(Δ/
 `tan(Δ/2) > Δ/2`.
 
 The optimizer also emits a monotone piecewise linear map from baseline chainage to active chainage
-(`chainageMapBaselineKm` / `chainageMapActiveKm`). Scheduled stops are entered against the imported
-chainage, so they are projected through this map before they are drawn as station flags or handed to
-the kinematics engine — a stop stays on the same physical point of the line instead of drifting
-against the new geometry.
+(`chainageMapBaselineKm` / `chainageMapActiveKm`). Its nodes sit on the part of every straight that
+neither neighbouring curve consumed, where both axes run on the same ground, so anything entered
+against the imported chainage keeps its physical position. Scheduled stops, the measured cant, the
+vertical profile and the TTP speed signs are projected through this map, and the muted imported
+curvature curve is drawn through it too, so both curvature curves line up on the same ground instead
+of drifting apart by the length every reshaped curve gave up.
 
 ### Outputs
 
