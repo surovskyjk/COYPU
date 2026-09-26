@@ -5,10 +5,6 @@ from collections import deque
 # design found no permissible speed there, which is an impassable section rather than a stop.
 DESIGN_PROFILE_STATION_KEYS = ("stationSpeed100", "stationSpeed130", "stationSpeed150", "stationSpeedK")
 
-# Floor on the braking rate, so a steep falling gradient cannot cancel the brakes entirely
-# and drive the backward pass to a standstill, in m/s^2
-MINIMUM_BRAKING_DECEL_MS2 = 0.05
-
 # Recorded against a vehicle whose selected design profile drops to zero somewhere on the run
 WARNING_ZERO_SPEED_SECTION = "zeroSpeedSection"
 
@@ -228,11 +224,11 @@ class VehicleCalculator:
                 forceRes = self.getVehicleResistance(vNextKmh)
                 forceTrack = self.getTrackResistance(slopeArr[i], curvArr[i])
                 
-                # Brakes and the natural resistances act together. Taking the larger of the two
-                # credited the brakes with nothing at all on a rising gradient, and ignored the
-                # gradient entirely on a falling one. forceTrack is signed, so this is a sum.
+                # trainBrakeDecel is the total deceleration of the simplified braking model, the
+                # resistances are already part of it. Only natural resistance strong enough to
+                # slow the train harder than that on its own is taken instead.
                 aNat = (forceRes + forceTrack) / self.effectiveMass
-                aDecel = max(self.trainBrakeDecel + aNat, MINIMUM_BRAKING_DECEL_MS2)
+                aDecel = max(self.trainBrakeDecel, aNat)
                 
                 # Calculate required entry speed solving backwards
                 vNewSq = vNext**2 + 2 * aDecel * ds
