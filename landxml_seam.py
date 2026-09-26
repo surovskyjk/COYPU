@@ -175,13 +175,48 @@ def trimElementEnd(data, elementIndex, stationKm, epsgInput):
     return trimmed
 
 
+# Signed element stream curvature at one pair entry, None where the data carries no curvature
+def streamCurvature(data, pairIndex):
+    curvature = data.get("curvature")
+    if curvature is None or len(curvature) == 0:
+        return None
+    return float(curvature[pairIndex])
+
+
+# Whether the cut leaves the incoming curvature at the seam no further off the existing alignment's
+# than the element's own end already is. A cut Spiral starts on the radius its clothoid has at the
+# cut, so where the files disagree, typically an existing tangent running on past the point at
+# which the incoming transition began, the cut opens a curvature step neither file has: a Spiral
+# leaving a Line at a finite radius. The cant design holds the deficiency at that start to the
+# Line's zero, which leaves no permissible speed at all, and the optimizer stops taking the Spiral
+# for a clothoid. A cut Line or Curve keeps its curvature, so it always passes.
+def isCutCurvatureContinuous(oldData, newData, elementIndex, seamKm, isAppend, epsgInput):
+    elementType, typeIndex, spanStartKm, _ = elementStream(newData)[elementIndex]
+    existingKappa = streamCurvature(oldData, -1 if isAppend else 0)
+    startKappa = streamCurvature(newData, 2 * elementIndex)
+    endKappa = streamCurvature(newData, 2 * elementIndex + 1)
+    if existingKappa is None or startKappa is None or endKappa is None:
+        return True
+
+    # Curvature runs linearly along a clothoid
+    lengthM = elementLengthM(newData, elementType, typeIndex, epsgInput)
+    distanceM = distanceAtStationM(newData, elementType, typeIndex, spanStartKm, seamKm, epsgInput)
+    cutKappa = startKappa + (endKappa - startKappa) * (distanceM / lengthM if lengthM > 0 else 0.0)
+    ownKappa = startKappa if isAppend else endKappa
+    return abs(cutKappa - existingKappa) <= abs(ownKappa - existingKappa)
+
+
 # The existing alignment wins the overlap: the incoming element crossing the seam is cut there,
 # so the merge that follows keeps it with a chainage span that matches its geometry. Elements
-# lying entirely inside the overlap are left for the merge to drop, as before.
+# lying entirely inside the overlap are left for the merge to drop, as before. An element the
+# cut would part from the existing curvature stays whole instead, its span clamped to the seam
+# by the merge and its drawing clipped there, the way every crossing element was kept before.
 def trimIncomingAtSeam(oldData, newData, epsgInput):
     isAppend, seamKm = mergeDirection(oldData, newData)
     for elementIndex, (_, _, spanStartKm, spanEndKm) in enumerate(elementStream(newData)):
         if spanStartKm < seamKm - SEAM_TOLERANCE_KM and spanEndKm > seamKm + SEAM_TOLERANCE_KM:
+            if not isCutCurvatureContinuous(oldData, newData, elementIndex, seamKm, isAppend, epsgInput):
+                return newData
             trim = trimElementStart if isAppend else trimElementEnd
             return trim(newData, elementIndex, seamKm, epsgInput)
     return newData
