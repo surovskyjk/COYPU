@@ -12,7 +12,7 @@ Built with Python and PySide6.
 
 - Parse and visualize LandXML horizontal alignment files (lines, spirals, curves; cant; vertical profile)
 - Parse line speed limits from XML TTP files (Czech national infrastructure registry format)
-- Append multiple LandXML or TTP files to build a longer corridor
+- Append multiple LandXML or TTP files to build a longer corridor. When an appended LandXML file overlaps the alignment, leaves a gap or sits off it at the seam, a review window shows the overlap, the gap and the offset at the seam, can frame the seam on the map with the new file drawn dashed, and on confirmation keeps the existing alignment and cuts the new file's element crossing the seam so both meet in one point
 - Optional alignment optimization: enlarge curve radii and lengthen transition curves inside a bounded lateral slew envelope, preview the new curvature against the imported baseline, and revert at any time
 - Design cant (D) and calculate permissible speed profiles for four speed profiles (difference in global max cant deficiency): V100, V130, V150, VK
 - Enforce norm limits: cant ramp gradient (n), rate of change of cant deficiency (nI), abrupt change of cant deficiency (deltaI)
@@ -445,6 +445,7 @@ The Batch page runs many track variants unattended and compares them side by sid
 - `settings_dialog.py` - dialog for editing command aliases and keyboard shortcuts
 - `config/shortcuts.json` - external command name, alias, and keyboard shortcut mappings
 - `landxml_merger.py` - chainage-rebasing concatenation of several parsed LandXML alignments
+- `landxml_seam.py` - seam analysis of an appended LandXML file and the trim of the element crossing the seam
 - `project_metadata.py` - project metadata model and the Project Properties dialog
 - `project_file.py` - native `.coypu` archive format, recent projects list and recovery snapshot paths
 - `landxml_exporter.py` - LandXML 1.2 writer for the horizontal geometry, calculated cant and vertical profile

@@ -69,6 +69,14 @@ BASELINE_ALIGNMENT_DASH = "6,6"
 SLEW_INDICATOR_WEIGHT = 7
 SLEW_INDICATOR_OPACITY = 0.55
 
+# A file waiting in the seam dialog, dashed so it never reads as part of the alignment yet
+SEAM_PREVIEW_COLOR = "#0a9396"
+SEAM_PREVIEW_DASH = "8,6"
+SEAM_PREVIEW_WEIGHT = 3
+
+# Outline of each seam marker by its role: the existing end, the new file's edge, the seam chainage
+SEAM_MARKER_COLORS = {"existing": "#c1121f", "incoming": SEAM_PREVIEW_COLOR, "atSeam": "#ee9b00"}
+
 # Base maps offered by the overlay selector, the value is stored in currentBaseMap
 BASEMAP_CHOICES = [
     ("positron", "mapPositron", "CartoDB Voyager"),
@@ -799,6 +807,9 @@ class MapWidget(QWidget):
         self.viewCenterLat = None
         self.viewCenterLon = None
         self.viewZoom = None
+        # Incoming file shown while its seam is reviewed, polylines plus (lat, lon, tooltip, role)
+        self.seamPreviewPolylines = []
+        self.seamPreviewMarkers = []
         self.mapBrowser.loadFinished.connect(self.onMapLoadFinished)
 
         # Floating Qt controls sit above the web view and survive every page reload
@@ -1130,7 +1141,8 @@ class MapWidget(QWidget):
 
     # Redraw the alignment when there is data, otherwise show the empty map
     def redraw(self):
-        if len(self.alignment) >= 2:
+        # One polyline per element, so an alignment of a single straight is still one to draw
+        if self.alignment:
             self.drawAlignment(self.alignment, self.lxml)
         else:
             self.resetMap()
@@ -1283,7 +1295,7 @@ class MapWidget(QWidget):
         # The chainage column is cached because the cursor lookup runs on every mouse move
         self.denseStations = [point[0] for point in self.denseAlignment]
 
-        if len(alignment) < 2:
+        if not alignment:
             self.resetMap()
             return
 
@@ -1309,9 +1321,43 @@ class MapWidget(QWidget):
             self.drawSlewIndicators(m, lxml or {})
 
         self.drawStyledAlignment(m, alignment, lxml)
+        self.drawSeamPreview(m)
 
         self.addStationMarkers(m)
         self.renderMap(m)
+
+    # Show a file that is not merged yet next to the alignment, with its seam points marked
+    def setSeamPreview(self, polylines, markers):
+        self.seamPreviewPolylines = [list(points) for points in polylines if len(points) >= 2]
+        self.seamPreviewMarkers = list(markers)
+        self.redraw()
+
+    # A caller about to redraw anyway passes redraw=False, sparing the page a second rebuild
+    def clearSeamPreview(self, redraw=True):
+        if not self.seamPreviewPolylines and not self.seamPreviewMarkers:
+            return
+        self.seamPreviewPolylines = []
+        self.seamPreviewMarkers = []
+        if redraw:
+            self.redraw()
+
+    def drawSeamPreview(self, m):
+        if self.seamPreviewPolylines:
+            folium.PolyLine(self.seamPreviewPolylines, color=SEAM_PREVIEW_COLOR,
+                            weight=SEAM_PREVIEW_WEIGHT, opacity=0.9, dash_array=SEAM_PREVIEW_DASH,
+                            tooltip=self.lan.get("seamPreviewIncoming", "File being appended")).add_to(m)
+        for latitude, longitude, tooltip, role in self.seamPreviewMarkers:
+            folium.CircleMarker([latitude, longitude], radius=6, color=SEAM_MARKER_COLORS.get(role, "#333333"),
+                                weight=2, fill=True, fill_color="#ffffff", fill_opacity=1.0,
+                                tooltip=tooltip).add_to(m)
+
+    # Frame a box given in degrees, queued so a page still loading applies it once it is live
+    def zoomToBounds(self, south, west, north, east):
+        if not self.hasValidBounds((south, west, north, east)):
+            return
+        south, west, north, east = (json.dumps(float(value)) for value in (south, west, north, east))
+        self.queueScript(
+            "fit", f"if (window.coypuFitBounds) {{ window.coypuFitBounds({south}, {west}, {north}, {east}); }}")
 
     # The active axis keeps every rendering style, whether or not it has been optimized
     def drawStyledAlignment(self, m, alignment, lxml):

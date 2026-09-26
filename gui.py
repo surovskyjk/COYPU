@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QTabWidget, QApplication, QMainWindow, QPushButto
                                 QHBoxLayout, QVBoxLayout, QLabel, QPlainTextEdit, QFileDialog,
                                 QSplitter, QMessageBox, QStyle, QToolBar, QMenu, QStackedWidget,
                                 QStatusBar, QLineEdit, QTextEdit, QComboBox, QAbstractItemView,
-                                QToolButton, QSizePolicy, QProgressBar)
+                                QToolButton, QSizePolicy, QProgressBar, QDialog)
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QCursor, QDesktopServices
 
 # pyqtgraph imports
@@ -53,6 +53,7 @@ import batch_results
 import batch_metrics
 import batch_runner
 import landxml_merger
+import landxml_seam
 from batch_dialog import BatchProcessingDialog
 from batch_progress import BatchProgressDialog
 from variant_dashboard import VariantDashboardWidget
@@ -272,6 +273,8 @@ class MainWindow(QMainWindow):
         self.optimizationController.progressChanged.connect(self.onOptimizationProgress)
         self.baselineAlignmentCache = None
         self.slewReportWindow = None
+        # Modeless review of an appended file's seam, open until the user appends or cancels
+        self.pendingSeamDialog = None
 
         # Shared active speed profile driving the ribbon, the graphs dock and the statistics dock
         self.profileState = profile_state.ProfileStateManager(self)
@@ -1519,6 +1522,8 @@ class MainWindow(QMainWindow):
 
     # Start an empty project and immediately ask for its identification
     def newProject(self):
+        if self.raisePendingSeamReview():
+            return
         if not self.confirmDiscardChanges():
             return
         # Rebuilding the map inside the closing confirm dialog crashes the embedded web view
@@ -1596,6 +1601,8 @@ class MainWindow(QMainWindow):
 
     # Read one .coypu archive and rebuild every dataset, dock, plot and the map from it
     def loadProjectFile(self, filepath, adoptPath=True):
+        if self.raisePendingSeamReview():
+            return False
         lan = self.translationManager.getLanguage(self.currentLanguage)
         try:
             payload, rawAssets = self.projectFileManager.readProjectArchive(filepath)
@@ -2238,6 +2245,8 @@ class MainWindow(QMainWindow):
         self.appendLandXMLContent(fileContent, fileName)
 
     def appendLandXMLContent(self, fileContent, fileName=None):
+        if self.raisePendingSeamReview():
+            return
         if "LandXML" not in self.dataStorage or len(self.dataStorage.get("LandXML", {}).get("stationHorizontal", [])) == 0:
             lan = self.translationManager.getLanguage(self.currentLanguage)
             err = QMessageBox()
@@ -2258,11 +2267,73 @@ class MainWindow(QMainWindow):
                 return
 
         newLandXMLData = readfile.ReadFile().ParseLandXML(fileContent, self.epsgInput, selectedIdx)
+        if len(newLandXMLData.get("stationHorizontal", [])) == 0:
+            return
 
+        # A seam that overlaps, leaves a gap or steps sideways is shown before anything is merged
+        report = landxml_seam.analyzeSeam(self.dataStorage["LandXML"], newLandXMLData, self.epsgInput)
+        if not report["needsAttention"]:
+            self.commitLandXMLAppend(fileName, newLandXMLData, fileContent)
+            return
+
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        dialog = gui_overlay.SeamResolutionDialog(report, lan, self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.showOnMapRequested.connect(lambda: self.showSeamOnMap(report, newLandXMLData))
+        dialog.finished.connect(
+            lambda result: self.onSeamReviewFinished(result, fileName, newLandXMLData, fileContent))
+        self.pendingSeamDialog = dialog
+        dialog.show()
+
+    # The file is recorded only once it is actually merged, so a cancelled review leaves no trace
+    def commitLandXMLAppend(self, fileName, newLandXMLData, fileContent):
         # Cache this file's resolved contribution before merging, enables a later selective purge
         self.recordLandXMLSource(fileName, newLandXMLData, fileContent)
-
         self.mergeLandXMLData(newLandXMLData)
+
+    def onSeamReviewFinished(self, result, fileName, newLandXMLData, fileContent):
+        self.pendingSeamDialog = None
+        isAccepted = result == QDialog.DialogCode.Accepted
+        # An accepted append redraws the map itself, a second rebuild just for the preview is wasted
+        self.mapWidget.clearSeamPreview(redraw=not isAccepted)
+        if isAccepted:
+            self.commitLandXMLAppend(fileName, newLandXMLData, fileContent)
+
+    # The file being appended drawn dashed next to the alignment, the map framed on the seam
+    def showSeamOnMap(self, report, newLandXMLData):
+        if "existingEndXY" not in report:
+            return
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        self.showMapView()
+
+        incomingEdgeKey = "seamMarkerIncomingStart" if report["isAppend"] else "seamMarkerIncomingEnd"
+        seamPoints = [(report["existingEndXY"], lan.get("seamMarkerExisting", "Existing alignment at the seam"), "existing"),
+                      (report["incomingStartXY"], lan.get(incomingEdgeKey, "Edge of the new file"), "incoming")]
+        if report["overlapM"] > landxml_seam.OVERLAP_NOTICE_M:
+            seamPoints.append((report["incomingAtSeamXY"],
+                               lan.get("seamMarkerIncomingAtSeam", "New file at the seam chainage"), "atSeam"))
+        latitudes, longitudes = readfile.transformToLatLon([point[0] for point, _, _ in seamPoints],
+                                                           [point[1] for point, _, _ in seamPoints], self.epsgInput)
+        markers = [(float(lat), float(lon), tooltip, role)
+                   for lat, lon, (_, tooltip, role) in zip(latitudes, longitudes, seamPoints)]
+        polylines = [points for points, _ in newLandXMLData.get("alignmentCoordinates", [])]
+        self.mapWidget.setSeamPreview(polylines, markers)
+
+        # S-JTSK mirrors both axes, so the box is framed from all four of its corners
+        minX, minY, maxX, maxY = report["zoomBoxXY"]
+        cornerLats, cornerLons = readfile.transformToLatLon([minX, minX, maxX, maxX], [minY, maxY, minY, maxY],
+                                                            self.epsgInput)
+        self.mapWidget.zoomToBounds(float(np.min(cornerLats)), float(np.min(cornerLons)),
+                                    float(np.max(cornerLats)), float(np.max(cornerLons)))
+
+    # A seam review holds a parse against the alignment as it stood, so anything that would change
+    # the alignment first brings the open review back to the front instead of running underneath it
+    def raisePendingSeamReview(self):
+        if self.pendingSeamDialog is None:
+            return False
+        self.pendingSeamDialog.raise_()
+        self.pendingSeamDialog.activateWindow()
+        return True
 
     def mergeLandXMLData(self, newData):
         if len(newData.get("stationHorizontal", [])) == 0:
@@ -2281,35 +2352,15 @@ class MainWindow(QMainWindow):
         self.mapWidget.drawAlignment(mergedData.get("alignmentCoordinates",[]), mergedData)
 
     # Overlap merge of one parsed segment onto an alignment, touching neither the storage nor the
-    # views, so the imported alignment can also be replayed silently from the source stack
-    def mergedLandXmlData(self, oldData, newData, warnOnGap=True):
-        oldStart = np.nanmin(oldData["stationHorizontal"])
-        oldEnd = np.nanmax(oldData["stationHorizontal"])
-        newStart = np.nanmin(newData["stationHorizontal"])
-        newEnd = np.nanmax(newData["stationHorizontal"])
+    # views, so the imported alignment can also be replayed silently from the source stack. The
+    # seam itself is reviewed before an interactive append, see appendLandXMLContent.
+    def mergedLandXmlData(self, oldData, newData):
+        isAppend, cropStation = landxml_seam.mergeDirection(oldData, newData)
 
-        lan = self.translationManager.getLanguage(self.currentLanguage)
-
-        if newStart >= oldEnd or (abs(newStart - oldEnd) <= abs(newEnd - oldStart)):
-            isAppend = True
-            cropStation = oldEnd
-            if "keyX" in oldData and "keyY" in oldData and "keyX" in newData and "keyY" in newData:
-                if len(oldData["keyX"]) > 0 and len(newData["keyX"]) > 0:
-                    oldLastX, oldLastY = oldData["keyX"][-1], oldData["keyY"][-1]
-                    newFirstX, newFirstY = newData["keyX"][0], newData["keyY"][0]
-                    dist = np.sqrt((newFirstX - oldLastX)**2 + (newFirstY - oldLastY)**2)
-                    if dist > 100 and warnOnGap:
-                        QMessageBox.warning(self, lan.get("merge_gap_warning_title", "Warning"), lan.get("merge_gap_warning_desc", "Gap > 100m"))
-        else:
-            isAppend = False
-            cropStation = oldStart
-            if "keyX" in oldData and "keyY" in oldData and "keyX" in newData and "keyY" in newData:
-                if len(oldData["keyX"]) > 0 and len(newData["keyX"]) > 0:
-                    oldFirstX, oldFirstY = oldData["keyX"][0], oldData["keyY"][0]
-                    newLastX, newLastY = newData["keyX"][-1], newData["keyY"][-1]
-                    dist = np.sqrt((newLastX - oldFirstX)**2 + (newLastY - oldFirstY)**2)
-                    if dist > 100 and warnOnGap:
-                        QMessageBox.warning(self, lan.get("merge_gap_warning_title", "Warning"), lan.get("merge_gap_warning_desc", "Gap > 100m"))
+        # The existing alignment wins the overlap. The incoming element crossing the seam used to
+        # keep its full geometry under a span clamped to the seam, so it lay on top of the existing
+        # element. It is cut at the seam now, and the crop below keeps it with a matching span.
+        newData = landxml_seam.trimIncomingAtSeam(oldData, newData, self.epsgInput)
 
         stationMap = {
             "cant": "stationCant",
@@ -2350,14 +2401,6 @@ class MainWindow(QMainWindow):
             oldArr = oldData[key]
             newArr = newData[key]
 
-            if key == "denseAlignment":
-                if isAppend:
-                    newArrCropped = [p for p in newArr if p[0] > cropStation]
-                    return oldArr + newArrCropped
-                else:
-                    newArrCropped = [p for p in newArr if p[0] < cropStation]
-                    return newArrCropped + oldArr
-
             if key in ["keyStations", "keyTypes", "keyX", "keyY", "keyLat", "keyLon"]:
                 newStations = np.array(newData["keyStations"])
                 mask = newStations > cropStation if isAppend else newStations < cropStation
@@ -2381,8 +2424,6 @@ class MainWindow(QMainWindow):
                     mask = newStations > cropStation if isAppend else newStations < cropStation
             elif key in landxml_merger.ELEMENT_TYPE_OF_KEY:
                 mask = typeMasks[landxml_merger.ELEMENT_TYPE_OF_KEY[key]]
-            elif key in landxml_merger.ELEMENT_LIST_KEYS:
-                mask = elementKeep
             else:
                 if isinstance(oldArr, np.ndarray) and isinstance(newArr, np.ndarray):
                     if isAppend: return np.concatenate((oldArr, newArr))
@@ -2409,7 +2450,9 @@ class MainWindow(QMainWindow):
         mergedData = {}
         allKeys = set(list(oldData.keys()) + list(newData.keys()))
         for k in allKeys:
-            mergedData[k] = mergeArrays(k)
+            # The map polylines and the dense chainage list are rebuilt from the merged elements below
+            if k not in optimization_runner.DISPLAY_LANDXML_KEYS:
+                mergedData[k] = mergeArrays(k)
 
         if "stationVertical" in mergedData and "elevation" in mergedData:
             deltaZ = np.diff(np.array(mergedData["elevation"], dtype=float))
@@ -2418,6 +2461,9 @@ class MainWindow(QMainWindow):
             valid = deltaX != 0
             mergedData["slope"][valid] = deltaZ[valid] / deltaX[valid]
 
+        # Rebuilt rather than spliced, so every polyline stays at its element's index and each
+        # element's samples end on its own span, whatever an earlier merge left behind
+        readfile.ReadFile().alignmentCoordinates(mergedData, self.epsgInput, "EPSG:4326")
         return mergedData
 
     # Cache one imported LandXML file's resolved contribution, enables a later selective purge
@@ -2491,14 +2537,14 @@ class MainWindow(QMainWindow):
         return mergedStations, mergedSpeeds
 
     # Imported alignment replayed from every surviving source stack entry, None without any entry
-    def importedLandXmlFromSources(self, warnOnGap=False):
+    def importedLandXmlFromSources(self):
         mergedData = None
         for entry in self.sourceStack.entriesForKind(source_stack.LANDXML_KIND):
             payload = copy.deepcopy(entry.payload)
             if mergedData is None:
                 mergedData = payload
             elif len(payload.get("stationHorizontal", [])) > 0:
-                mergedData = self.mergedLandXmlData(mergedData, payload, warnOnGap)
+                mergedData = self.mergedLandXmlData(mergedData, payload)
         return mergedData
 
     # Imported TTP arrays replayed from every surviving source stack entry, None without any entry
@@ -2519,7 +2565,7 @@ class MainWindow(QMainWindow):
 
     # Rebuild the merged LandXML dataset by replaying every surviving source stack entry
     def rebuildLandXMLFromStack(self):
-        self.dataStorage["LandXML"] = self.importedLandXmlFromSources(warnOnGap=True) or {}
+        self.dataStorage["LandXML"] = self.importedLandXmlFromSources() or {}
 
         lxml = self.dataStorage.get("LandXML", {})
         self.updateTableLandXML(lxml)
@@ -2545,6 +2591,8 @@ class MainWindow(QMainWindow):
         self.refreshTtpSourceText()
 
     def parseLandXML(self, fileContent, fileName=None):
+        if self.raisePendingSeamReview():
+            return
         if fileContent is not None:
             # Check for multiple alignments and prompt the user if needed
             alignments = readfile.ReadFile().GetAlignments(fileContent)
@@ -3151,6 +3199,8 @@ class MainWindow(QMainWindow):
         self.popupWindows.append(win)
 
     def cleanData(self):
+        if self.raisePendingSeamReview():
+            return
         self.cleanLandXMLData()
         self.cleanTTPData()
         self.cleanCalculatedCants()
@@ -3193,6 +3243,8 @@ class MainWindow(QMainWindow):
         self.markProjectModified()
 
     def cleanLandXMLData(self):
+        if self.raisePendingSeamReview():
+            return
         self.textboxRawLandXML.setXmlText("")
         self.tableLandXML.setData({})
         self.dataStorage["LandXML"] = {}
@@ -3454,6 +3506,8 @@ class MainWindow(QMainWindow):
 
     # Granular purge: segment manager plus optional calculation, stops and complete reset scopes
     def openPurgeDialog(self):
+        if self.raisePendingSeamReview():
+            return
         lan = self.translationManager.getLanguage(self.currentLanguage)
         dialog = PurgeDataDialog(self.sourceStack, lan, self)
         if dialog.exec():
@@ -4420,6 +4474,8 @@ class MainWindow(QMainWindow):
 
     # Launches the parametric slew/spiral optimizer on a worker thread, additive to the baseline
     def runAlignmentOptimization(self):
+        if self.raisePendingSeamReview():
+            return
         lxml = self.dataStorage.get("LandXML", {})
         if "alignmentCoordinates" not in lxml:
             return
@@ -4799,6 +4855,8 @@ class MainWindow(QMainWindow):
 
     # Copy one batch variant into the live data storage so every standard view can inspect it
     def loadBatchVariantIntoViewport(self, variantId):
+        if self.raisePendingSeamReview():
+            return
         lan = self.translationManager.getLanguage(self.currentLanguage)
         result = self.batchResults.resultById(variantId)
         if result is None or result.get("status") != "ok":

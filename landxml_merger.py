@@ -35,9 +35,6 @@ ELEMENT_TYPE_OF_KEY = {key: elementType
                        for elementType, keys in ELEMENT_ARRAY_KEYS.items()
                        for key in keys}
 
-# Element indexed lists holding one polyline per element, cropped alongside the element stream
-ELEMENT_LIST_KEYS = ("alignmentCoordinates", "alignmentCoordsOriginal")
-
 
 # Split one keep decision per element into the per type masks the element arrays are indexed by
 def elementTypeMasks(geometryType, elementKeep):

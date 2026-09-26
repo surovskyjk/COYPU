@@ -5,12 +5,13 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
                                QHeaderView, QFileDialog, QMessageBox,
                                QDialogButtonBox, QPushButton, QComboBox,
                                QDoubleSpinBox, QSlider, QSpinBox, QWidget)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 import numpy as np
 import pyqtgraph as pg
 
 import basemap_key
+import landxml_seam
 import plot_widgets
 
 import csv
@@ -110,6 +111,103 @@ class AlignmentSelectDialog(QDialog):
         if selected:
             return selected[0].data(Qt.ItemDataRole.UserRole)
         return 0
+
+# Review of the seam an appended LandXML file makes with the alignment. It stays modeless so the
+# map behind it can be panned and zoomed while the user decides whether to append.
+class SeamResolutionDialog(QDialog):
+    showOnMapRequested = Signal()
+
+    def __init__(self, report, lan, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(lan.get("seamDialogTitle", "Check the seam"))
+        self.setModal(False)
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout()
+
+        overlapM = report.get("overlapM", 0.0)
+        jumpM = report.get("jumpM", 0.0)
+        station = f"{report.get('seamStationKm', 0.0):.3f}"
+        isInside = report.get("addsNothing", False)
+        hasOverlap = overlapM > landxml_seam.OVERLAP_NOTICE_M
+
+        if isInside:
+            heading = lan.get("seamHeadingInside", "The new file lies entirely within the existing alignment.")
+        elif hasOverlap:
+            heading = lan.get("seamHeadingOverlap", "The new file overlaps the existing alignment by {overlap} m of chainage.").format(overlap=f"{overlapM:.3f}")
+        elif overlapM < -landxml_seam.OVERLAP_NOTICE_M:
+            heading = lan.get("seamHeadingGap", "There is a chainage gap of {gap} m.").format(gap=f"{-overlapM:.3f}")
+        else:
+            heading = lan.get("seamHeadingJump", "The new file is {jump} m away at the seam.").format(jump=f"{jumpM:.3f}")
+        self.headingLabel = QLabel(heading)
+        self.headingLabel.setWordWrap(True)
+        layout.addWidget(self.headingLabel)
+
+        form = QFormLayout()
+        joinKey, joinFallback = (("seamJoinAfter", "after the existing alignment, at km {station}")
+                                 if report.get("isAppend", True)
+                                 else ("seamJoinBefore", "before the existing alignment, at km {station}"))
+        form.addRow(lan.get("seamRowJoin", "Joins"), QLabel(lan.get(joinKey, joinFallback).format(station=station)))
+        if overlapM >= 0:
+            form.addRow(lan.get("seamRowOverlap", "Chainage overlap"), QLabel(f"{overlapM:.3f} m"))
+        else:
+            form.addRow(lan.get("seamRowGap", "Chainage gap"), QLabel(f"{-overlapM:.3f} m"))
+        form.addRow(lan.get("seamRowJump", "Offset at the seam"), QLabel(f"{jumpM:.3f} m"))
+        form.addRow(lan.get("seamRowDeviation", "Change of direction"),
+                    QLabel(f"{report.get('tangentDeviationDeg', 0.0):.3f}°"))
+        for rowKey, rowFallback, elementKey in (("seamRowExisting", "Existing element at the seam", "existingElement"),
+                                                ("seamRowIncoming", "New element at the seam", "incomingElement")):
+            if report.get(elementKey):
+                form.addRow(lan.get(rowKey, rowFallback), QLabel(self.describeElement(report[elementKey], lan)))
+        layout.addLayout(form)
+
+        if isInside:
+            action = lan.get("seamActionInside", "Appending it would add nothing to the alignment.")
+        elif hasOverlap:
+            actionKey = "seamActionTrimAfter" if report.get("isAppend", True) else "seamActionTrimBefore"
+            action = lan.get(actionKey, "The existing alignment is kept, the new file is cut at km {station}.").format(station=station)
+        else:
+            action = lan.get("seamActionGap", "The new file is added unchanged and the gap remains.")
+        self.actionLabel = QLabel(action)
+        self.actionLabel.setWordWrap(True)
+        layout.addWidget(self.actionLabel)
+
+        # The offset at the seam survives any trim, so it is the one the user has to judge. The
+        # distance to the new file's first point is no measure: inside an overlap it is the overlap.
+        warnings = []
+        if jumpM > landxml_seam.GAP_WARN_M:
+            warnings.append(lan.get("seamWarnLargeGap", "The files are more than 100 m apart."))
+        elif jumpM > landxml_seam.JUMP_NOTICE_M:
+            warnings.append(lan.get("seamWarnJump", "The two files are {jump} m apart at the seam.").format(jump=f"{jumpM:.3f}"))
+        self.warningLabel = QLabel("\n".join(warnings))
+        self.warningLabel.setWordWrap(True)
+        self.warningLabel.setStyleSheet("font-weight: bold;")
+        self.warningLabel.setVisible(bool(warnings))
+        layout.addWidget(self.warningLabel)
+
+        buttons = QDialogButtonBox()
+        self.showOnMapButton = buttons.addButton(lan.get("seamShowOnMap", "Show on map"),
+                                                 QDialogButtonBox.ButtonRole.ActionRole)
+        applyText = (lan.get("seamApplyTrim", "Trim and append") if hasOverlap
+                     else lan.get("seamApplyAppend", "Append"))
+        self.applyButton = buttons.addButton(applyText, QDialogButtonBox.ButtonRole.AcceptRole)
+        self.applyButton.setEnabled(not isInside)
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        self.showOnMapButton.clicked.connect(self.showOnMapRequested.emit)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+    def describeElement(self, element, lan):
+        typeKeys = {"Line": ("elemLine", "Line"), "Spiral": ("elemSpiral", "Spiral"), "Curve": ("elemCurve", "Curve")}
+        typeKey, typeFallback = typeKeys.get(element.get("type"), ("", element.get("type", "")))
+        typeCaption = lan.get(typeKey, typeFallback)
+        length = f"{element.get('lengthM', 0.0):.3f}"
+        radius = element.get("radiusM", np.inf)
+        if radius is not None and np.isfinite(radius):
+            return lan.get("seamElementWithRadius", "{type}, R = {radius} m, {length} m long").format(
+                type=typeCaption, radius=f"{radius:.1f}", length=length)
+        return lan.get("seamElementStraight", "{type}, {length} m long").format(type=typeCaption, length=length)
 
 class MapSettingsDialog(QDialog):
     def __init__(self, currentEPSG, currentMap, currentDrawMode, currentSpeedProfile, lan,

@@ -11,6 +11,7 @@ from PySide6.QtCore import QByteArray
 
 import basemap_key
 import project_metadata
+import readfile
 import source_stack
 import theme_manager
 from resource_paths import getWritableRoot
@@ -63,6 +64,23 @@ AUTO_SAVE_INTERVAL_MS = 5 * 60 * 1000
 # True when a LandXML sub-key was produced by the geometry engine instead of the parser
 def isCalculatedLandXmlKey(keyName):
     return any(keyName.startswith(prefix) for prefix in CALCULATED_LANDXML_PREFIXES)
+
+
+# Keys only an optimizer run writes into the active LandXML dictionary
+OPTIMIZED_LANDXML_MARKERS = ("optimizationSummary", "chainageMapActiveKm")
+
+
+# The map polylines and the dense chainage list are derived from the element arrays, and a saved
+# copy only reflects the sampling of the version that wrote it. Projects saved before arcs carried
+# their own chainage reopened with every arc sample on one station, so the copy is rebuilt.
+def rebuildDisplayGeometry(landXmlData, epsgInput):
+    if not isinstance(landXmlData, dict) or len(landXmlData.get("stationHorizontal", [])) == 0:
+        return
+    try:
+        readfile.ReadFile().alignmentCoordinates(landXmlData, epsgInput, "EPSG:4326")
+    except (KeyError, IndexError, ValueError, TypeError):
+        # A payload too lean to rebuild keeps what it was saved with
+        pass
 
 
 # Turn numpy arrays, tuples and scalars into structures the JSON encoder accepts
@@ -293,7 +311,20 @@ class ProjectFileManager:
         self.applyAlignmentsData(mainWindow, payload.get("alignmentsData", {}), rawAssets)
         self.applyStopsData(mainWindow, payload.get("stopsData", {}))
         self.applyCalculationCache(mainWindow, payload.get("calculationCache", {}))
+        epsgInput = payload.get("viewportState", {}).get("epsgInput", mainWindow.epsgInput)
+        self.rebuildAlignmentDisplay(mainWindow, epsgInput)
         self.applyViewportState(mainWindow, payload.get("viewportState", {}))
+
+    # Every imported segment is a plain parse, so its map data always rebuilds exactly. The active
+    # alignment is rebuilt only while it is still the import: an optimized axis saved before its
+    # element coordinates were promoted carries imported coordinates under optimized stations.
+    def rebuildAlignmentDisplay(self, mainWindow, epsgInput):
+        for entry in mainWindow.sourceStack.entriesForKind(source_stack.LANDXML_KIND):
+            rebuildDisplayGeometry(entry.payload, epsgInput)
+
+        landXmlData = mainWindow.dataStorage.get("LandXML", {})
+        if not any(landXmlData.get(key) is not None for key in OPTIMIZED_LANDXML_MARKERS):
+            rebuildDisplayGeometry(landXmlData, epsgInput)
 
     # Vehicles, geometry limits and every other persisted setting replace the defaults wholesale
     def applyVehicleConfiguration(self, mainWindow, vehicleConfiguration):
