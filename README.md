@@ -6,6 +6,30 @@ A desktop application for railway track geometry analysis and train performance 
 
 Built with Python and PySide6.
 
+**Current version: 0.3.0** - downloads and release notes are on the [Releases](https://github.com/surovskyjk/COYPU/releases) page.
+
+---
+
+## Download and Run
+
+Windows, no installation needed: download `COYPU.exe` from the latest [release](https://github.com/surovskyjk/COYPU/releases/latest) and start it. The build is not code-signed, so Windows SmartScreen may ask for confirmation first ("More info", then "Run anyway"). The SHA-256 checksum of the file is listed in the release notes.
+
+From source (Python 3.14 was used during development):
+
+```
+pip install -r requirements.txt
+python main.py
+```
+
+Building the single-file executable yourself:
+
+```
+pip install pyinstaller
+pyinstaller --clean --noconfirm COYPU.spec
+```
+
+The result is `dist/COYPU.exe`. The version shown in its file properties, written into saved `.coypu` projects and into the header of exported LandXML files comes from one place, `app_version.py`.
+
 ---
 
 ## Main Features
@@ -15,6 +39,7 @@ Built with Python and PySide6.
 - Append multiple LandXML or TTP files to build a longer corridor. When an appended LandXML file overlaps the alignment, leaves a gap or sits off it at the seam, a review window shows the overlap, the gap and the offset at the seam, can frame the seam on the map with the new file drawn dashed, and on confirmation keeps the existing alignment and cuts the new file's element crossing the seam so both meet in one point
 - Optional alignment optimization: enlarge curve radii and lengthen transition curves inside a bounded lateral slew envelope, preview the new curvature against the imported baseline, and revert at any time
 - Design cant (D) and calculate permissible speed profiles for four speed profiles (difference in global max cant deficiency): V100, V130, V150, VK
+- One active design speed profile (TTP, V100, V130, V150, VK) shared by every profile selector in the application, with the kinematics of the profiles evaluated on a background thread
 - Enforce norm limits: cant ramp gradient (n), rate of change of cant deficiency (nI), abrupt change of cant deficiency (deltaI)
 - Simulate train kinematics using a forward-backward pass algorithm with traction, resistance, and braking
 - Interactive map viewer showing the alignment coloured by selected speed profile (TTP, V100, V130, V150, VK) with a colour-scale legend, a basemap selector, an OpenRailwayMap overlay with adjustable transparency, and markers for every scheduled stop
@@ -380,7 +405,7 @@ of drifting apart by the length every reshaped curve gave up.
 Train motion is simulated by numerical integration of the equation of motion at 1 m intervals along the alignment.
 
 - Forward pass - accelerates the train from initial speed using tractive effort, subtracting vehicle resistance, gradient resistance, and curve resistance; speed is capped at the permissible speed profile at each step
-- Backward pass - applies braking from the end of the section or from each speed reduction point, using a constant deceleration value
+- Backward pass - applies braking from the end of the section or from each speed reduction point, using a constant deceleration value. That value is the total braking deceleration of a simplified model, the vehicle, gradient and curve resistances are already part of it; natural resistance replaces it only where it would slow the train down harder than the brakes
 - Final speed profile - element-wise minimum of the forward and backward passes
 - Train length look-ahead - the speed limit applied at each point is the minimum over a sliding window equal to the train length, so the full train must fit within each speed restriction
 
@@ -413,12 +438,16 @@ The Batch page runs many track variants unattended and compares them side by sid
 ## Project Structure
 
 - `main.py` - application entry point
+- `app_version.py` - the single source of the application version
+- `COYPU.spec` - PyInstaller build specification of the single-file Windows executable
 - `gui.py` - main window, ribbon, docks and data flow
 - `gui_overlay.py` - settings and vehicle dialogs, detached plot window
 - `geometry_engine.py` - cant design, permissible speed calculation and the alignment optimizer
 - `optimization_runner.py` - isolated background execution of the alignment optimization
 - `slew_report.py` - lateral slew summary table and its window
 - `vehicle_engine.py` - train kinematics simulation
+- `simulation_runner.py` - isolated multi profile kinematics evaluation on a background thread
+- `profile_state.py` - the active design speed profile shared by every profile selector
 - `readfile.py` - LandXML and XML TTP parsers, coordinate transformations
 - `map_viewer.py` - interactive Folium map widget with floating map controls
 - `basemap_key.py` - CARTO basemap key storage in the operating system credential vault
@@ -459,6 +488,14 @@ The Batch page runs many track variants unattended and compares them side by sid
 - `report_formats.py` - renders a report's lines to Text, Markdown, LaTeX, CSV or PDF
 - `batch_export.py` - assembles a batch's reports, protocols and comparison data into one ZIP archive
 - `tests/` - unit tests for the geometry engine, vehicle catalog, and batch processing modules
+
+---
+
+## License
+
+COYPU is released under the [MIT License](LICENSE).
+
+The Windows executable bundles PySide6 / Qt (including Qt WebEngine) under the LGPL-3.0, loaded dynamically at run time. This repository, the pinned `requirements.txt` and `COYPU.spec` are everything needed to rebuild the executable against a modified or different PySide6 / Qt build. The other bundled packages (pyqtgraph, numpy, pyproj, pyclothoids, folium, branca, keyring and their dependencies) are distributed under MIT, BSD, Apache-2.0 or MPL-2.0 licenses.
 
 ---
 

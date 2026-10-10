@@ -4,6 +4,7 @@ from datetime import datetime
 
 import numpy as np
 
+import app_version
 import project_metadata
 
 # Namespace and schema version every exported document declares
@@ -14,7 +15,7 @@ LANDXML_VERSION = "1.2"
 
 # Application identity required in the header of every exported file
 EXPORTER_APPLICATION_NAME = "COYPU"
-EXPORTER_APPLICATION_VERSION = "2.0"
+EXPORTER_APPLICATION_VERSION = app_version.__version__
 EXPORTER_MANUFACTURER = "COYPU Team"
 
 # Preferred vertical curve radius, scaled down only when adjacent tangents would overlap

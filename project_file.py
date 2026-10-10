@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QByteArray
 
+import app_version
 import basemap_key
 import project_metadata
 import readfile
@@ -29,7 +30,7 @@ ASSET_DIRECTORY = "assets"
 
 # Application identity written into both the project header and the LandXML export
 APPLICATION_NAME = "COYPU"
-APPLICATION_VERSION = "2.0"
+APPLICATION_VERSION = app_version.__version__
 APPLICATION_MANUFACTURER = "COYPU Team"
 
 # Marker wrapping a numpy array so shape and dtype survive the JSON round trip
