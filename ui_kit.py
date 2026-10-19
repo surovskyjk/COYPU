@@ -10,6 +10,20 @@ DARK_CARD_TOKENS = {"border": "#4d4d4d", "alternateBase": "#333333",
                     "text": "#e6e6e6", "mutedText": "#b0b0b0"}
 
 
+# English captions of the three stopping patterns, used when a locale lacks the entry
+DEFAULT_PATTERN_CAPTIONS = {"Os": "Os (local)", "Sp": "Sp (semi-fast)", "Ex": "Ex (express)"}
+
+
+# Caption of one stopping pattern from the translation, with the English text as fallback
+def patternCaptionFor(lan, patternKey):
+    return lan.get(f"stopPattern{patternKey}", DEFAULT_PATTERN_CAPTIONS.get(patternKey, patternKey))
+
+
+# Plural neutral count text such as "stops: 6", so no language needs a plural form
+def stopsCountText(lan, count):
+    return lan.get("stopsCountLabel", "stops: {count}").format(count=count)
+
+
 # Compact KPI tile showing a bold value, a muted caption and an optional sub caption
 class MetricCard(QFrame):
     def __init__(self, captionText="", parent=None):

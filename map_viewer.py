@@ -21,6 +21,7 @@ from branca.element import MacroElement, Template
 
 import basemap_key
 import icons
+import karto_export
 from geometry_engine import SLEW_VISIBLE_THRESHOLD_MM
 from ribbon import SERIES_TOGGLE_PROPERTY
 
@@ -1681,26 +1682,7 @@ class MapWidget(QWidget):
 
     # Linear interpolation of latitude and longitude along the densified alignment
     def interpolatePosition(self, stationKm):
-        stations = self.denseStations
-        if not stations:
-            return None
-
-        # denseAlignment stores chainage in kilometres like the rest of the geometry
-        target = float(stationKm)
-        if target <= stations[0]:
-            return self.denseAlignment[0][1], self.denseAlignment[0][2]
-        if target >= stations[-1]:
-            return self.denseAlignment[-1][1], self.denseAlignment[-1][2]
-
-        index = int(np.searchsorted(stations, target, side='right')) - 1
-        index = max(0, min(index, len(self.denseAlignment) - 2))
-
-        startStation, startLat, startLon = self.denseAlignment[index]
-        endStation, endLat, endLon = self.denseAlignment[index + 1]
-        span = endStation - startStation
-        ratio = 0.0 if span == 0 else (target - startStation) / span
-
-        return startLat + ratio * (endLat - startLat), startLon + ratio * (endLon - startLon)
+        return karto_export.interpolateCenterline(self.denseStations, self.denseAlignment, stationKm)
 
     def getBearing(self, lat1, lon1, lat2, lon2):
         lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])

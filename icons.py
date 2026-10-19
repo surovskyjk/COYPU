@@ -25,6 +25,8 @@ ICON_BODIES = {
     "calculate": "<rect x='4' y='3' width='16' height='18' rx='2'/><path d='M8 7h8'/><path d='M8 12h2'/><path d='M14 12h2'/><path d='M8 16h2'/><path d='M14 16h2'/>",
     "calculateAlt": "<rect x='4' y='3' width='16' height='18' rx='2'/><path d='M8 7h8'/><path d='M8 12h8'/><path d='M8 16h4'/>",
     "run": "<circle cx='12' cy='12' r='9'/><path d='M10 8l6 4-6 4z'/>",
+    "clock": "<circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/>",
+    "direction": "<path d='M4 8h14'/><path d='M14 4l4 4-4 4'/><path d='M20 16H6'/><path d='M10 12l-4 4 4 4'/>",
     "settings": "<circle cx='12' cy='12' r='3'/><path d='M12 2v3'/><path d='M12 19v3'/><path d='M2 12h3'/><path d='M19 12h3'/><path d='M5 5l2 2'/><path d='M17 17l2 2'/><path d='M19 5l-2 2'/><path d='M7 17l-2 2'/>",
     "vehicle": "<rect x='3' y='6' width='18' height='9' rx='2'/><circle cx='8' cy='18' r='2'/><circle cx='16' cy='18' r='2'/><path d='M3 11h18'/>",
     "stops": "<path d='M12 3a6 6 0 0 1 6 6c0 4-6 12-6 12S6 13 6 9a6 6 0 0 1 6-6z'/><circle cx='12' cy='9' r='2'/>",

@@ -73,6 +73,18 @@
       "shortcut": "Ctrl+R"
     },
     {
+      "commandName": "ScenarioMatrix",
+      "action": "scenarioMatrixAction",
+      "alias": "matrix",
+      "shortcut": ""
+    },
+    {
+      "commandName": "TimetableMargins",
+      "action": "scheduleSettingsAction",
+      "alias": "timetable",
+      "shortcut": ""
+    },
+    {
       "commandName": "CleanAll",
       "action": "cleanDataAction",
       "alias": "clean",

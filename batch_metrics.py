@@ -85,6 +85,36 @@ def stopTiming(stationsM, timesS, stationKm, dwellSeconds):
     return max(0.0, depTime - dwellSeconds), depTime
 
 
+# Origin to destination time and one row per leg for stops in run order, extra stop fields pass through
+def computeTravelTimeSectionDetails(stationsM, timesS, orderedStops):
+    originDestTime = None
+    legs = []
+    if not (hasData(stationsM) and hasData(timesS) and len(orderedStops) >= 2):
+        return {"originDestTimeS": originDestTime, "legs": legs}
+
+    _, depFirst = stopTiming(stationsM, timesS, orderedStops[0][0], orderedStops[0][1])
+    arrLast, _ = stopTiming(stationsM, timesS, orderedStops[-1][0], orderedStops[-1][1])
+    if depFirst is not None and arrLast is not None:
+        originDestTime = arrLast - depFirst
+
+    for legIndex in range(len(orderedStops) - 1):
+        fromStop = orderedStops[legIndex]
+        toStop = orderedStops[legIndex + 1]
+        _, depA = stopTiming(stationsM, timesS, fromStop[0], fromStop[1])
+        arrB, _ = stopTiming(stationsM, timesS, toStop[0], toStop[1])
+        # A leg the run never covered keeps its row, so the gap reads as no data instead of vanishing
+        legs.append({
+            "fromStop": fromStop,
+            "toStop": toStop,
+            "fromStationKm": float(fromStop[0]),
+            "toStationKm": float(toStop[0]),
+            "lengthKm": abs(float(toStop[0]) - float(fromStop[0])),
+            "runTimeS": None if depA is None or arrB is None else arrB - depA,
+            "dwellAtToS": float(toStop[1]),
+        })
+    return {"originDestTimeS": originDestTime, "legs": legs}
+
+
 # Total, origin-to-destination and inter-station travel times for one vehicle
 def computeTravelTimeSections(dataStorage, vehicleIndex):
     stationsM = dataStorage.get(f"kinematicsStationM_{vehicleIndex}")
@@ -93,26 +123,16 @@ def computeTravelTimeSections(dataStorage, vehicleIndex):
 
     # Ordering by the direction of travel is what keeps a reversed run from reporting negative legs
     stops = orderStopsForRun(stopsList(dataStorage), stationsM)
-    originDestTime = None
+    details = computeTravelTimeSectionDetails(stationsM, timesS, stops)
+
     interstationRows = []
+    for leg in details["legs"]:
+        kmA, nameA = leg["fromStop"][0], leg["fromStop"][2]
+        kmB, nameB = leg["toStop"][0], leg["toStop"][2]
+        label = f"{nameA or f'{kmA:.3f}'} → {nameB or f'{kmB:.3f}'}"
+        interstationRows.append((label, leg["runTimeS"]))
 
-    if hasData(stationsM) and hasData(timesS) and len(stops) >= 2:
-        _, depFirst = stopTiming(stationsM, timesS, stops[0][0], stops[0][1])
-        arrLast, _ = stopTiming(stationsM, timesS, stops[-1][0], stops[-1][1])
-        if depFirst is not None and arrLast is not None:
-            originDestTime = arrLast - depFirst
-
-        for legIndex in range(len(stops) - 1):
-            kmA, dwellA, nameA = stops[legIndex]
-            kmB, dwellB, nameB = stops[legIndex + 1]
-            _, depA = stopTiming(stationsM, timesS, kmA, dwellA)
-            arrB, _ = stopTiming(stationsM, timesS, kmB, dwellB)
-            label = f"{nameA or f'{kmA:.3f}'} → {nameB or f'{kmB:.3f}'}"
-            # A leg the run never covered keeps its row, so the gap reads as no data instead of vanishing
-            legTime = None if depA is None or arrB is None else arrB - depA
-            interstationRows.append((label, legTime))
-
-    return totalTime, originDestTime, interstationRows
+    return totalTime, details["originDestTimeS"], interstationRows
 
 
 # Linear-interpolate a station-indexed series onto a common chainage grid, NaN outside its range

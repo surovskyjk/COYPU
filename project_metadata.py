@@ -2,7 +2,7 @@
 from datetime import datetime
 
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
-                               QLineEdit, QPlainTextEdit, QVBoxLayout)
+                               QLineEdit, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget)
 
 # Every metadata field persisted into a .coypu project, in dialog order
 METADATA_FIELD_KEYS = (
@@ -11,6 +11,9 @@ METADATA_FIELD_KEYS = (
     "contractNumber",
     "projectDate",
     "description",
+    "lineNumber",
+    "lineName",
+    "lineCategory",
     "targetStandard",
     "trackSection",
     "definitionSection",
@@ -20,6 +23,16 @@ METADATA_FIELD_KEYS = (
     "horizontalDatum",
     "verticalDatum",
 )
+
+# Line category codes, an empty code means not specified
+LINE_CATEGORY_CODES = ("", "regional", "national")
+
+# Translation key and English fallback of every line category caption
+LINE_CATEGORY_LABELS = {
+    "": ("lineCategoryNone", "Not specified"),
+    "regional": ("lineCategoryRegional", "Regional"),
+    "national": ("lineCategoryNational", "National / TEN-T"),
+}
 
 # Suggested design norms offered by the editable target standard combo box
 STANDARD_SUGGESTIONS = ("ČSN 73 6360", "TSI INF", "DB Ril 800.0110", "SŽ S3", "EN 13803")
@@ -49,6 +62,9 @@ def buildDefaultMetadata():
         "contractNumber": "",
         "projectDate": datetime.now().strftime(DATE_FORMAT),
         "description": "",
+        "lineNumber": "",
+        "lineName": "",
+        "lineCategory": "",
         "targetStandard": STANDARD_SUGGESTIONS[0],
         "trackSection": "",
         "definitionSection": "",
@@ -67,6 +83,9 @@ def normalizeMetadata(rawMetadata):
         value = (rawMetadata or {}).get(fieldKey)
         if value is not None:
             normalized[fieldKey] = str(value)
+    # Only the known category codes survive, anything else reads as not specified
+    if normalized["lineCategory"] not in LINE_CATEGORY_CODES:
+        normalized["lineCategory"] = ""
     return normalized
 
 
@@ -83,15 +102,28 @@ class ProjectMetadataDialog(QDialog):
         self.metadata = normalizeMetadata(metadata)
 
         self.setWindowTitle(self.lan.get("projectPropertiesTitle", "Project Properties"))
-        self.setMinimumSize(560, 620)
+        self.setMinimumSize(560, 580)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        layout.addWidget(self.buildIdentificationGroup())
-        layout.addWidget(self.buildSectionGroup())
-        layout.addWidget(self.buildCoordinateGroup())
+        # The groups scroll, so the buttons stay on screen even on a small display
+        groupsHost = QWidget()
+        groupsLayout = QVBoxLayout(groupsHost)
+        groupsLayout.setContentsMargins(0, 0, 0, 0)
+        groupsLayout.setSpacing(8)
+        groupsLayout.addWidget(self.buildIdentificationGroup())
+        groupsLayout.addWidget(self.buildLineGroup())
+        groupsLayout.addWidget(self.buildSectionGroup())
+        groupsLayout.addWidget(self.buildCoordinateGroup())
+        groupsLayout.addStretch(1)
+
+        scrollArea = QScrollArea()
+        scrollArea.setWidgetResizable(True)
+        scrollArea.setFrameShape(QScrollArea.Shape.NoFrame)
+        scrollArea.setWidget(groupsHost)
+        layout.addWidget(scrollArea, 1)
 
         self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                           | QDialogButtonBox.StandardButton.Cancel)
@@ -129,6 +161,27 @@ class ProjectMetadataDialog(QDialog):
         self.inputDescription = QPlainTextEdit(self.metadata["description"])
         self.inputDescription.setMinimumHeight(80)
         formLayout.addRow(self.lan.get("metadataDescription", "Description / notes:"), self.inputDescription)
+
+        return group
+
+    # Line identification shared with the exported dataset
+    def buildLineGroup(self):
+        group = QGroupBox(self.lan.get("metadataGroupLine", "Line"))
+        formLayout = QFormLayout(group)
+
+        self.inputLineNumber = QLineEdit(self.metadata["lineNumber"])
+        formLayout.addRow(self.lan.get("metadataLineNumber", "Line number:"), self.inputLineNumber)
+
+        self.inputLineName = QLineEdit(self.metadata["lineName"])
+        formLayout.addRow(self.lan.get("metadataLineName", "Line name:"), self.inputLineName)
+
+        self.inputLineCategory = QComboBox()
+        for categoryCode in LINE_CATEGORY_CODES:
+            labelKey, fallbackText = LINE_CATEGORY_LABELS[categoryCode]
+            self.inputLineCategory.addItem(self.lan.get(labelKey, fallbackText), categoryCode)
+        self.inputLineCategory.setCurrentIndex(
+            max(0, self.inputLineCategory.findData(self.metadata["lineCategory"])))
+        formLayout.addRow(self.lan.get("metadataLineCategory", "Line category:"), self.inputLineCategory)
 
         return group
 
@@ -184,6 +237,9 @@ class ProjectMetadataDialog(QDialog):
             "contractNumber": self.inputContractNumber.text().strip(),
             "projectDate": self.inputProjectDate.text().strip(),
             "description": self.inputDescription.toPlainText().strip(),
+            "lineNumber": self.inputLineNumber.text().strip(),
+            "lineName": self.inputLineName.text().strip(),
+            "lineCategory": self.inputLineCategory.currentData() or "",
             "targetStandard": self.inputTargetStandard.currentText().strip(),
             "trackSection": self.inputTrackSection.text().strip(),
             "definitionSection": self.inputDefinitionSection.text().strip(),

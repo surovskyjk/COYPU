@@ -7,6 +7,7 @@ from profile_state import DEFAULT_PROFILE_KEY, ProfileSelectorBar
 from ui_kit import CollapsibleSection, DARK_CARD_TOKENS, LIGHT_CARD_TOKENS, MetricCard
 from vehicle_catalog import MAX_VEHICLES
 import batch_metrics
+import schedule_rules
 
 # Row height used to size the segment tables without letting them grow unbounded
 TABLE_ROW_HEIGHT_PX = 22
@@ -61,11 +62,13 @@ class TrackStatisticsWidget(QWidget):
         self.actualMaxCard = MetricCard()
         self.totalTimeCard = MetricCard()
         self.originDestCard = MetricCard()
+        self.scheduledCard = MetricCard()
         cardsLayout.addWidget(self.lengthCard, 0, 0)
         cardsLayout.addWidget(self.designMaxCard, 0, 1)
         cardsLayout.addWidget(self.actualMaxCard, 1, 0)
         cardsLayout.addWidget(self.totalTimeCard, 1, 1)
-        cardsLayout.addWidget(self.originDestCard, 2, 0, 1, 2)
+        cardsLayout.addWidget(self.originDestCard, 2, 0)
+        cardsLayout.addWidget(self.scheduledCard, 2, 1)
         outerLayout.addLayout(cardsLayout)
 
         # Detail tables live in collapsible sections, built eagerly so refreshes always find them
@@ -344,7 +347,8 @@ class TrackStatisticsWidget(QWidget):
     def refreshTravelTimeSection(self):
         totalTime, originDestTime, legs = self.calculateSectionalTravelTimes()
         self.totalTimeCard.setValue(self.formatDuration(totalTime))
-        self.originDestCard.setValue(self.formatDuration(originDestTime))
+        self.originDestCard.setValue(self.formatDuration(originDestTime), self.patternDirectionText())
+        self.refreshScheduledCard()
 
         self.interstationTable.setRowCount(0)
         for label, legTime in legs:
@@ -353,6 +357,26 @@ class TrackStatisticsWidget(QWidget):
             self.interstationTable.setItem(row, 0, QTableWidgetItem(label))
             self.interstationTable.setItem(row, 1, QTableWidgetItem(self.formatDuration(legTime)))
         self.constrainTableHeight(self.interstationTable)
+
+    # Scheduled origin to destination time of the active stopping pattern and the selected vehicle
+    def refreshScheduledCard(self):
+        vehicleIndex = self.vehicleCombo.currentData()
+        scheduled = None
+        if vehicleIndex is not None:
+            scheduled = schedule_rules.scheduleFromStorage(self.lastDataStorage or {}, vehicleIndex)
+        self.scheduledCard.setValue(
+            self.formatDuration(scheduled["scheduledOriginDestS"] if scheduled else None),
+            self.patternDirectionText())
+
+    # Active stopping pattern and the shown direction, the context both travel time cards refer to
+    def patternDirectionText(self):
+        settingsData = (self.lastDataStorage or {}).get("settingsData", {}) or {}
+        patternKey = settingsData.get("activeStopPattern", "")
+        isReversed = bool(settingsData.get("runReversed", False))
+        directionText = (self.lan.get("directionReverseShort", "Reverse") if isReversed
+                         else self.lan.get("directionForwardShort", "Forward"))
+        patternText = f'{self.lan.get("statsScheduledPattern", "Pattern")} {patternKey}' if patternKey else ""
+        return " · ".join(part for part in (patternText, directionText) if part)
 
     # Re-render the vehicle dependent sections only, used by the vehicle selector
     def onVehicleChanged(self, index):
@@ -383,6 +407,10 @@ class TrackStatisticsWidget(QWidget):
         self.actualMaxCard.setCaption(self.lan.get("statsCardActualSpeed", "Max achieved speed"))
         self.totalTimeCard.setCaption(self.lan.get("statsCardTotalTime", "Total travel time"))
         self.originDestCard.setCaption(self.lan.get("statsCardOriginDest", "Origin → Destination"))
+        self.scheduledCard.setCaption(self.lan.get("statsCardScheduled", "Scheduled O→D"))
+        self.scheduledCard.setToolTip(self.lan.get(
+            "statsScheduledTip",
+            "Origin to destination time with the timetable margins and rounding of the active pattern"))
 
         self.designSection.setTitle(self.lan.get("statsSectionDesign", "Design segments"))
         self.actualSection.setTitle(self.lan.get("statsSectionActual", "Achieved segments"))
@@ -405,7 +433,7 @@ class TrackStatisticsWidget(QWidget):
         borderColor = tokens.get("border", "#c4c4c4")
 
         for card in (self.lengthCard, self.designMaxCard, self.actualMaxCard,
-                    self.totalTimeCard, self.originDestCard):
+                    self.totalTimeCard, self.originDestCard, self.scheduledCard):
             card.applyTheme(isDark, tokens)
 
         # Setting only the background would leave the cell text on whatever the style last used

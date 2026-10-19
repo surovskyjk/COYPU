@@ -3,6 +3,7 @@ import base64
 
 from PySide6.QtCore import QByteArray
 
+import project_file
 import theme_manager
 
 PRESET_VERSION = 1
@@ -85,3 +86,5 @@ class PresetManager:
             while len(vehicles) <= index:
                 vehicles.append({})
             vehicles[index] = catalogVehicle.toVehicleSettings(vehicles[index])
+        # An imported vehicle must carry every key the newer schema added
+        project_file.upgradeSettingsData(settingsData)

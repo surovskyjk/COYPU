@@ -1,5 +1,6 @@
 # Native .coypu project archive: a ZIP wrapping project.json plus the raw imported assets
 import base64
+import copy
 import json
 import re
 import zipfile
@@ -11,9 +12,13 @@ from PySide6.QtCore import QByteArray
 
 import app_version
 import basemap_key
+import default_values
+import karto_export
 import project_metadata
 import readfile
+import schedule_rules
 import source_stack
+import stops_model
 import theme_manager
 from resource_paths import getWritableRoot
 
@@ -22,7 +27,14 @@ PROJECT_EXTENSION = ".coypu"
 RECOVERY_SUFFIX = ".bak"
 
 # Schema version stamped into every archive so future readers can migrate old files
-PROJECT_FORMAT_VERSION = 1
+PROJECT_FORMAT_VERSION = 2
+
+# Oldest schema version this build still reads, older files are migrated in memory
+OLDEST_SUPPORTED_FORMAT_VERSION = 1
+
+# Settings keys schema version 2 added, an older file is topped up from the defaults
+V2_SETTINGS_KEYS = ("baselineVehicleNames", "stopRecords", "activeStopPattern",
+                    "spPopulationThreshold", "isSpThresholdAuto", "scheduleSettings")
 
 # Entry names used inside the ZIP container
 PROJECT_JSON_NAME = "project.json"
@@ -126,6 +138,41 @@ def splitLandXmlData(landXmlData):
     return parsedGeometry, calculatedResults
 
 
+# Top up a settings dictionary with every key schema version 2 added, in place
+def upgradeSettingsData(settingsData):
+    if not isinstance(settingsData, dict):
+        return settingsData
+    for keyName in V2_SETTINGS_KEYS:
+        if keyName not in settingsData:
+            settingsData[keyName] = copy.deepcopy(default_values.defVal[keyName])
+    settingsData["scheduleSettings"] = schedule_rules.normalizeScheduleSettings(
+        settingsData.get("scheduleSettings"))
+    for vehicleSettings in settingsData.get("vehicles") or []:
+        if isinstance(vehicleSettings, dict):
+            vehicleSettings["directionLabels"] = stops_model.normalizeDirectionLabels(
+                vehicleSettings.get("directionLabels"))
+    stops_model.ensureStopSettings(settingsData)
+    return settingsData
+
+
+# Payload of an older schema upgraded in memory to the current one, the input is left untouched
+def migrateProjectPayload(payload):
+    migrated = dict(payload or {})
+    migrated["projectMetadata"] = project_metadata.normalizeMetadata(
+        migrated.get("projectMetadata", {}))
+
+    stopsData = dict(migrated.get("stopsData") or {})
+    if "stopRecords" not in stopsData:
+        legacyStops = decodeValue(stopsData.get("trainStops", []))
+        stopsData["stopRecords"] = stops_model.recordsFromLegacyStops(legacyStops)
+        stopsData.setdefault("activeStopPattern", stops_model.DEFAULT_ACTIVE_PATTERN)
+        stopsData.setdefault("spPopulationThreshold", stops_model.DEFAULT_SP_POPULATION_THRESHOLD)
+        stopsData.setdefault("isSpThresholdAuto", True)
+    migrated["stopsData"] = stopsData
+    migrated["formatVersion"] = PROJECT_FORMAT_VERSION
+    return migrated
+
+
 class RecentProjectsStore:
     def __init__(self, appSettings):
         self.appSettings = appSettings
@@ -172,6 +219,14 @@ class ProjectFileManager:
             "viewportState": self.collectViewportState(mainWindow),
         }
 
+    # Point the payload at the Karto entry, called only once the dataset was actually built
+    def attachKartoPointer(self, payload):
+        payload["kartoDataset"] = {
+            "entryName": karto_export.KARTO_ENTRY_NAME,
+            "schemaVersion": karto_export.KARTO_SCHEMA_VERSION,
+        }
+        return payload
+
     # Parsed horizontal and vertical geometry plus the provenance of every merged segment
     def collectAlignmentsData(self, mainWindow):
         parsedGeometry, _ = splitLandXmlData(mainWindow.dataStorage.get("LandXML", {}))
@@ -206,6 +261,12 @@ class ProjectFileManager:
         settingsData = mainWindow.dataStorage.get("settingsData", {})
         return {
             "trainStops": encodeValue(settingsData.get("trainStops", [])),
+            "stopRecords": encodeValue(settingsData.get("stopRecords", [])),
+            "activeStopPattern": settingsData.get("activeStopPattern",
+                                                  stops_model.DEFAULT_ACTIVE_PATTERN),
+            "spPopulationThreshold": settingsData.get("spPopulationThreshold",
+                                                      stops_model.DEFAULT_SP_POPULATION_THRESHOLD),
+            "isSpThresholdAuto": bool(settingsData.get("isSpThresholdAuto", True)),
             "defaultDwellTime": settingsData.get("defaultDwellTime", 30.0),
             "stationSpeedLimits": encodeValue(mainWindow.dataStorage.get("stationSpeedLimits", [])),
             "speedLimits": encodeValue(mainWindow.dataStorage.get("speedLimits", [])),
@@ -272,8 +333,17 @@ class ProjectFileManager:
                 assets[assetName] = entry.rawText
         return assets
 
-    # Write one compressed .coypu archive holding the payload and every raw asset
-    def writeProjectArchive(self, filePath, payload, rawAssets):
+    # Compact JSON text of the Karto dataset, None when building it fails so a save is never blocked
+    def collectKartoDataset(self, mainWindow):
+        try:
+            dataset = karto_export.buildKartoDataset(
+                mainWindow.dataStorage, mainWindow.projectMetadata, mainWindow.epsgInput)
+            return karto_export.serializeKartoDataset(dataset)
+        except Exception:
+            return None
+
+    # Write one compressed .coypu archive holding the payload, every raw asset and the Karto dataset
+    def writeProjectArchive(self, filePath, payload, rawAssets, kartoDataset=None):
         targetPath = Path(filePath)
         targetPath.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(targetPath, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -281,8 +351,10 @@ class ProjectFileManager:
                              json.dumps(payload, indent=2, ensure_ascii=False))
             for assetName, assetText in (rawAssets or {}).items():
                 archive.writestr(assetName, assetText or "")
+            if kartoDataset:
+                archive.writestr(karto_export.KARTO_ENTRY_NAME, kartoDataset)
 
-    # Read a .coypu archive back into its payload dictionary and raw asset texts
+    # Read a .coypu archive back into its payload dictionary and raw asset texts, karto/ is never read
     def readProjectArchive(self, filePath):
         with zipfile.ZipFile(Path(filePath), "r") as archive:
             payload = json.loads(archive.read(PROJECT_JSON_NAME).decode("utf-8"))
@@ -295,7 +367,8 @@ class ProjectFileManager:
     # Reject archives written by a newer schema before any state is touched
     def validatePayload(self, payload):
         formatVersion = (payload or {}).get("formatVersion", 0)
-        if not isinstance(formatVersion, int) or formatVersion < 1:
+        isInteger = isinstance(formatVersion, int) and not isinstance(formatVersion, bool)
+        if not isInteger or formatVersion < OLDEST_SUPPORTED_FORMAT_VERSION:
             raise ValueError("not a COYPU project file")
         if formatVersion > PROJECT_FORMAT_VERSION:
             raise ValueError(f"project format version {formatVersion} is newer than supported "
@@ -304,6 +377,7 @@ class ProjectFileManager:
     # Restore every section of a previously saved project into the live main window
     def applyProjectPayload(self, mainWindow, payload, rawAssets):
         self.validatePayload(payload)
+        payload = migrateProjectPayload(payload)
 
         mainWindow.projectMetadata = project_metadata.normalizeMetadata(
             payload.get("projectMetadata", {}))
@@ -334,7 +408,7 @@ class ProjectFileManager:
         if isinstance(settingsData, dict):
             settingsData.pop(basemap_key.LEGACY_SETTINGS_KEY, None)
         if settingsData:
-            mainWindow.dataStorage["settingsData"] = settingsData
+            mainWindow.dataStorage["settingsData"] = upgradeSettingsData(settingsData)
 
     # Parsed geometry and the source stack behind it, assets reattached to their segments
     def applyAlignmentsData(self, mainWindow, alignmentsData, rawAssets):
@@ -360,6 +434,14 @@ class ProjectFileManager:
         settingsData = mainWindow.dataStorage.setdefault("settingsData", {})
         settingsData["trainStops"] = decodeValue(stopsData.get("trainStops", []))
         settingsData["defaultDwellTime"] = stopsData.get("defaultDwellTime", 30.0)
+        if "stopRecords" in stopsData:
+            settingsData["stopRecords"] = decodeValue(stopsData["stopRecords"])
+            settingsData["activeStopPattern"] = stopsData.get("activeStopPattern",
+                                                              stops_model.DEFAULT_ACTIVE_PATTERN)
+            settingsData["spPopulationThreshold"] = stopsData.get(
+                "spPopulationThreshold", stops_model.DEFAULT_SP_POPULATION_THRESHOLD)
+            settingsData["isSpThresholdAuto"] = bool(stopsData.get("isSpThresholdAuto", True))
+        stops_model.ensureStopSettings(settingsData)
         mainWindow.dataStorage["stationSpeedLimits"] = decodeValue(
             stopsData.get("stationSpeedLimits", []))
         mainWindow.dataStorage["speedLimits"] = decodeValue(stopsData.get("speedLimits", []))

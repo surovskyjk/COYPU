@@ -1,7 +1,5 @@
 # Modal dialog for configuring and launching a batch of track variants
 import copy
-import csv
-import io
 from pathlib import Path
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QTabWidget, QWidget,
@@ -12,6 +10,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, Q
 import batch_config
 import geometry_engine
 import readfile
+import stops_model
+from ui_kit import stopsCountText
 
 # Default export formats offered on the Output tab, key -> initially checked
 DEFAULT_EXPORT_FORMATS = (("txt", True), ("csv", True), ("md", False),
@@ -152,6 +152,10 @@ class BatchProcessingDialog(QDialog):
         self.addStopsProfileButton = QPushButton(self.lan.get("batchAddStopsProfile", "Add stopping pattern..."))
         self.addStopsProfileButton.clicked.connect(self.addStopsProfile)
         buttonsRow.addWidget(self.addStopsProfileButton)
+        self.addProjectPatternsButton = QPushButton(self.lan.get("batchAddProjectPatterns",
+                                                                 "Add project patterns (Os/Sp/Ex)"))
+        self.addProjectPatternsButton.clicked.connect(self.addProjectPatterns)
+        buttonsRow.addWidget(self.addProjectPatternsButton)
         self.removeStopsProfileButton = QPushButton(self.lan.get("batchRemoveStopsProfile", "Remove"))
         self.removeStopsProfileButton.clicked.connect(self.removeStopsProfile)
         buttonsRow.addWidget(self.removeStopsProfileButton)
@@ -162,7 +166,8 @@ class BatchProcessingDialog(QDialog):
     # Several patterns are usually compared in one batch, so the picker takes them all at once
     def addStopsProfile(self):
         filePaths, _ = QFileDialog.getOpenFileNames(
-            self, self.lan.get("batchAddStopsProfile", "Add stopping pattern..."), "", "CSV Files (*.csv)")
+            self, self.lan.get("batchAddStopsProfile", "Add stopping pattern..."), "",
+            self.lan.get("csvFileFilter", "CSV Files (*.csv)"))
         if not filePaths:
             return
 
@@ -173,15 +178,27 @@ class BatchProcessingDialog(QDialog):
                 problems.append(f"{Path(filePath).name}: {fileContent or ''}".strip())
                 continue
 
-            trainStops = self.parseStopsCsv(fileContent)
-            if not trainStops:
+            parsed = stops_model.parseStopsCsv(fileContent, self.projectDwellTime(), self.projectSpThreshold())
+            if not parsed["records"]:
                 problems.append(f"{Path(filePath).name}: "
                                 f"{self.lan.get('batchStopsFileEmpty', 'no usable stop rows')}")
                 continue
 
-            profileId = f"profile{len(self.stopsProfiles) + 1}"
-            self.stopsProfiles.append({"stopsProfileId": profileId, "label": Path(filePath).stem,
-                                       "fileName": Path(filePath).name, "trainStops": trainStops})
+            # A file with a named header carries three stopping patterns, a legacy file just one
+            if not parsed["isLegacyFormat"]:
+                addedCount = 0
+                for patternKey in stops_model.PATTERN_KEYS:
+                    patternStops = stops_model.patternTrainStops(parsed["records"], patternKey)
+                    if len(patternStops) >= 2:
+                        self.appendStopsProfile(f"{Path(filePath).stem} · {patternKey}",
+                                                Path(filePath).name, patternStops)
+                        addedCount += 1
+                if not addedCount:
+                    problems.append(f"{Path(filePath).name}: "
+                                    f"{self.lan.get('batchStopsFileEmpty', 'no usable stop rows')}")
+            else:
+                self.appendStopsProfile(Path(filePath).stem, Path(filePath).name,
+                                        stops_model.patternTrainStops(parsed["records"], "Os"))
 
         self.refreshStopsProfileList()
         self.refreshVariantPreview()
@@ -193,20 +210,52 @@ class BatchProcessingDialog(QDialog):
                                              "Some stopping patterns could not be imported:")
                                 + "\n" + "\n".join(problems))
 
-    # Same contract as StopsSettingsDialog.importCSV: skip one header row, positional [km, dwell, name]
+    # Stops of the Os pattern from CSV text, the shared parser reads both the new and the legacy header
     def parseStopsCsv(self, fileContent):
-        trainStops = []
-        reader = csv.reader(io.StringIO(fileContent), delimiter=',')
-        next(reader, None)
-        for row in reader:
-            try:
-                stationKm = float(row[0])
-                dwell = float(row[1])
-                name = str(row[2]) if len(row) > 2 else ""
-                trainStops.append([stationKm, dwell, name])
-            except (IndexError, ValueError):
-                continue
-        return trainStops
+        parsed = stops_model.parseStopsCsv(fileContent)
+        return stops_model.patternTrainStops(parsed["records"], "Os")
+
+    # Default dwell time and Sp population threshold of the open project, for the shared CSV parser
+    def projectDwellTime(self):
+        dwellS = stops_model.parseNumber(self.settingsData.get("defaultDwellTime"))
+        return stops_model.DEFAULT_DWELL_TIME_S if dwellS is None else dwellS
+
+    def projectSpThreshold(self):
+        return self.settingsData.get("spPopulationThreshold", stops_model.DEFAULT_SP_POPULATION_THRESHOLD)
+
+    # Register one stopping pattern profile under the next free identifier
+    def appendStopsProfile(self, label, fileName, trainStops, isProjectPattern=False):
+        usedNumbers = [int(str(profile.get("stopsProfileId", ""))[len("profile"):])
+                       for profile in self.stopsProfiles
+                       if str(profile.get("stopsProfileId", ""))[len("profile"):].isdigit()]
+        profileId = f"profile{max(usedNumbers, default=0) + 1}"
+        profile = {"stopsProfileId": profileId, "label": label, "fileName": fileName,
+                   "trainStops": trainStops}
+        if isProjectPattern:
+            profile["isProjectPattern"] = True
+        self.stopsProfiles.append(profile)
+
+    # Add the three stopping patterns of the open project as separate profiles
+    def addProjectPatterns(self):
+        records = stops_model.normalizeStopRecords(self.settingsData.get("stopRecords"))
+        projectLabel = self.lan.get("batchProjectPatternsLabel", "Project")
+        projectPatterns = [(patternKey, stops_model.patternTrainStops(records, patternKey))
+                           for patternKey in stops_model.PATTERN_KEYS]
+        projectPatterns = [(patternKey, patternStops) for patternKey, patternStops in projectPatterns
+                           if len(patternStops) >= 2]
+
+        if not projectPatterns:
+            QMessageBox.warning(self, self.lan.get("error", "Error"),
+                                self.lan.get("batchProjectPatternsEmpty",
+                                             "The project has no stopping pattern with at least 2 stops"))
+            return
+
+        # A second click replaces the earlier project patterns instead of listing them twice
+        self.stopsProfiles = [profile for profile in self.stopsProfiles if not profile.get("isProjectPattern")]
+        for patternKey, patternStops in projectPatterns:
+            self.appendStopsProfile(f"{projectLabel} · {patternKey}", "", patternStops, True)
+        self.refreshStopsProfileList()
+        self.refreshVariantPreview()
 
     def removeStopsProfile(self):
         row = self.stopsProfileList.currentRow()
@@ -218,7 +267,8 @@ class BatchProcessingDialog(QDialog):
     def refreshStopsProfileList(self):
         self.stopsProfileList.clear()
         for profile in self.stopsProfiles:
-            self.stopsProfileList.addItem(f"{profile.get('label', '')} ({len(profile.get('trainStops', []))} stops)")
+            stopCount = len(profile.get("trainStops", []))
+            self.stopsProfileList.addItem(f"{profile.get('label', '')} ({stopsCountText(self.lan, stopCount)})")
 
     # --- Design approaches tab ---------------------------------------------
 

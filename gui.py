@@ -36,12 +36,16 @@ from profile_dock import ProfilePlotWidget
 from kinematics_dock import KinematicsPlotWidget
 from help_dock import HelpWidget
 from track_stats_dock import TrackStatisticsWidget
+from scenario_matrix_dock import ScenarioMatrixDialog, ScenarioMatrixWidget
+from ui_kit import patternCaptionFor, stopsCountText
 from xml_editor import XmlCodeEditor
 from translation_manager import TranslationManager
 from shortcut_manager import ShortcutManager
 import optimization_runner
 import profile_state
 import simulation_runner
+import scenario_matrix
+import stops_model
 from profile_state import ProfileSelectorBar
 import slew_report
 from settings_dialog import ShortcutSettingsDialog
@@ -101,7 +105,9 @@ ACTION_ICONS = {
     "mapSettingsAction": "map",
     "geometrySettingsAction": "settings",
     "vehicleSettingsAction": "vehicle",
-    "reverseDirectionAction": "stops",
+    "reverseDirectionAction": "direction",
+    "scenarioMatrixAction": "grid",
+    "scheduleSettingsAction": "clock",
     "stopsSettingsAction": "stops",
     "speedSettingsAction": "settings",
     "designApproachAction": "settings",
@@ -287,6 +293,12 @@ class MainWindow(QMainWindow):
         self.simulationController.simulationFailed.connect(self.onSimulationFailed)
         self.simulationController.progressChanged.connect(self.onSimulationProgress)
         self.simulationResultsByProfile = {}
+
+        # Scenario matrix on its own isolated thread, results land in dataStorage and the matrix dock
+        self.scenarioMatrixController = scenario_matrix.ScenarioMatrixController(self)
+        self.scenarioMatrixController.matrixFinished.connect(self.onScenarioMatrixFinished)
+        self.scenarioMatrixController.matrixFailed.connect(self.onScenarioMatrixFailed)
+        self.scenarioMatrixController.progressChanged.connect(self.onScenarioMatrixProgress)
 
         # State the group speed columns were last evaluated for, so two D+I passes are not repeated
         self.optimizationImpactSignatureCache = None
@@ -512,14 +524,35 @@ class MainWindow(QMainWindow):
         self.toggleSlewPlotAction.toggled.connect(self.onSlewPlotToggled)
         self.toggleSlewPlotAction.setEnabled(False)
 
-        self.reverseDirectionAction = QAction(lan.get("runAgainstStationing",
-                                                       "Run against stationing"), self)
+        # Both directions are always simulated, the toggle only chooses which one the plots show
+        self.reverseDirectionAction = QAction(lan.get("viewReverseDirection",
+                                                       "Show reverse direction"), self)
         self.reverseDirectionAction.setCheckable(True)
         self.reverseDirectionAction.setProperty(SERIES_TOGGLE_PROPERTY, True)
         self.reverseDirectionAction.setToolTip(lan.get(
-            "runAgainstStationingTip",
-            "Drive the whole simulation from the highest chainage towards the lowest"))
+            "viewReverseDirectionTip",
+            "Show the run from the highest chainage towards the lowest, both directions are simulated"))
         self.reverseDirectionAction.toggled.connect(self.onRunDirectionToggled)
+
+        # Compact selector of the active stopping pattern, kept in step with the Stops Settings dialog
+        self.ribbonPatternSelector = QWidget()
+        patternSelectorLayout = QHBoxLayout(self.ribbonPatternSelector)
+        patternSelectorLayout.setContentsMargins(0, 0, 0, 0)
+        patternSelectorLayout.setSpacing(4)
+        self.ribbonPatternLabel = QLabel()
+        self.ribbonPatternLabel.setStyleSheet("font-size: 10px;")
+        self.ribbonPatternCombo = QComboBox()
+        self.ribbonPatternCombo.setMinimumWidth(150)
+        self.ribbonPatternCombo.currentIndexChanged.connect(self.onRibbonPatternChanged)
+        patternSelectorLayout.addWidget(self.ribbonPatternLabel)
+        patternSelectorLayout.addWidget(self.ribbonPatternCombo)
+        self.ribbonPatternSelector.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+
+        self.scenarioMatrixAction = QAction(lan.get("scenarioMatrix", "Scenario matrix..."), self)
+        self.scenarioMatrixAction.triggered.connect(self.openScenarioMatrix)
+
+        self.scheduleSettingsAction = QAction(lan.get("scheduleSettings", "Timetable margins..."), self)
+        self.scheduleSettingsAction.triggered.connect(self.openScheduleSettings)
 
         self.includeSlewSectionAction = QAction(lan.get("includeSlewSection", "Append Slew Summary"), self)
         self.includeSlewSectionAction.setCheckable(True)
@@ -628,6 +661,7 @@ class MainWindow(QMainWindow):
         self.exportGeometryReportAction.triggered.connect(self.exportGeometryReport)
 
         self.buildSeriesActions()
+        self.refreshPatternCombo()
 
     # Create the checkable series visibility actions used by the View ribbon tab
     def buildSeriesActions(self):
@@ -765,8 +799,8 @@ class MainWindow(QMainWindow):
     # Every dock of the main window in a stable order, empty before buildDocks runs
     def allDocks(self):
         dockNames = ("dockWorkflow", "dockGraphs", "dockProfile", "dockKinematics",
-                     "dockTrackStats", "dockLandXmlRaw", "dockLandXmlParsed", "dockTtpRaw",
-                     "dockTtpParsed", "dockHelp")
+                     "dockTrackStats", "dockScenarioMatrix", "dockLandXmlRaw", "dockLandXmlParsed",
+                     "dockTtpRaw", "dockTtpParsed", "dockHelp")
         return tuple(getattr(self, name) for name in dockNames if hasattr(self, name))
 
     # Build the central stacked viewport holding the map and the report page
@@ -875,6 +909,16 @@ class MainWindow(QMainWindow):
         self.dockTrackStats.setWidget(self.trackStatsWidget)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dockTrackStats)
 
+        # Raw and scheduled travel times over pattern, tier, vehicle and direction
+        self.scenarioMatrixWidget = ScenarioMatrixWidget(lan)
+        self.scenarioMatrixWidget.runRequested.connect(self.openScenarioMatrix)
+        self.scenarioMatrixWidget.marginsRequested.connect(self.openScheduleSettings)
+        self.scenarioMatrixWidget.rerunRequested.connect(self.rerunScenarioMatrix)
+        self.dockScenarioMatrix = LazyDockWidget(lan.get("dockScenarioMatrix", "Scenario matrix"),
+                                                 "dockScenarioMatrix", self.refreshScenarioMatrixDock)
+        self.dockScenarioMatrix.setWidget(self.scenarioMatrixWidget)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dockScenarioMatrix)
+
         # Documentation panel rendering the project README
         self.helpWidget = HelpWidget(lan)
         self.dockHelp = LazyDockWidget(lan.get("dockHelp", "Help"), "dockHelp")
@@ -888,6 +932,7 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self.dockLandXmlParsed, self.dockGraphs)
         self.tabifyDockWidget(self.dockProfile, self.dockKinematics)
         self.tabifyDockWidget(self.dockProfile, self.dockTrackStats)
+        self.tabifyDockWidget(self.dockProfile, self.dockScenarioMatrix)
         self.tabifyDockWidget(self.dockProfile, self.dockHelp)
 
         self.dockLandXmlRaw.raise_()
@@ -980,6 +1025,8 @@ class MainWindow(QMainWindow):
         runGroup = simulationPage.addGroup(lan.get("groupCalculate", "Calculate"), "groupCalculate")
         runGroup.addAction(self.calculateTrainSpeedAction, shortKey="shortRunSimulation")
         runGroup.addAction(self.reverseDirectionAction, isLarge=False, shortKey="shortRunDirection")
+        runGroup.addWidget(self.ribbonPatternSelector)
+        runGroup.addAction(self.scenarioMatrixAction, shortKey="shortScenarioMatrix")
 
         simulationProfileGroup = simulationPage.addGroup(lan.get("groupProfile", "Speed profile"),
                                                         "groupProfile")
@@ -990,6 +1037,7 @@ class MainWindow(QMainWindow):
         simulationConfigGroup.addAction(self.vehicleSettingsAction, shortKey="shortVehicles")
         simulationConfigGroup.addAction(self.openVehicleCatalogAction, shortKey="shortVehicleCatalog")
         simulationConfigGroup.addAction(self.stopsSettingsAction, shortKey="shortStops")
+        simulationConfigGroup.addAction(self.scheduleSettingsAction, shortKey="shortSchedule")
         self.toggleUnitsButton = simulationConfigGroup.addAction(self.toggleUnitsAction)
 
         simulationReportGroup = simulationPage.addGroup(lan.get("groupReport", "Report"), "groupReport")
@@ -1019,9 +1067,9 @@ class MainWindow(QMainWindow):
 
         panelsGroup = viewPage.addGroup(lan.get("groupPanels", "Panels"), "groupPanels")
         panelShortKeys = ("shortPanelWorkflow", "shortPanelGraphs", "shortPanelProfile",
-                          "shortPanelKinematics", "shortPanelTrackStats", "shortPanelLandxmlRaw",
-                          "shortPanelLandxmlData", "shortPanelTtpRaw", "shortPanelTtpData",
-                          "shortPanelHelp")
+                          "shortPanelKinematics", "shortPanelTrackStats", "shortPanelScenarioMatrix",
+                          "shortPanelLandxmlRaw", "shortPanelLandxmlData", "shortPanelTtpRaw",
+                          "shortPanelTtpData", "shortPanelHelp")
         for dock, shortKey in zip(self.allDocks(), panelShortKeys):
             panelsGroup.addAction(dock.toggleViewAction(), isLarge=False, shortKey=shortKey)
 
@@ -1073,6 +1121,7 @@ class MainWindow(QMainWindow):
         settingsConfigGroup.addAction(self.mapSettingsAction, shortKey="shortMap")
         settingsConfigGroup.addAction(self.vehicleSettingsAction, shortKey="shortVehicles")
         settingsConfigGroup.addAction(self.stopsSettingsAction, shortKey="shortStops")
+        settingsConfigGroup.addAction(self.scheduleSettingsAction, shortKey="shortSchedule")
         settingsConfigGroup.addAction(self.geometrySettingsAction, shortKey="shortLimits")
         settingsConfigGroup.addAction(self.openShortcutSettingsAction, shortKey="shortShortcuts")
 
@@ -1100,8 +1149,16 @@ class MainWindow(QMainWindow):
         self.statusSimulationProgress.setTextVisible(False)
         self.statusSimulationProgress.hide()
 
+        # Cancels a running scenario matrix between two engine passes
+        self.statusMatrixCancelButton = QPushButton(lan.get("matrixCancel", "Cancel matrix"))
+        self.statusMatrixCancelButton.clicked.connect(self.scenarioMatrixController.cancelMatrix)
+        self.statusMatrixCancelButton.setToolTip(lan.get(
+            "matrixCancelTip", "Stops the scenario matrix after the current pass"))
+        self.statusMatrixCancelButton.hide()
+
         self.statusBarWidget.addWidget(self.statusEngineLabel, 1)
         self.statusBarWidget.addPermanentWidget(self.statusSimulationProgress)
+        self.statusBarWidget.addPermanentWidget(self.statusMatrixCancelButton)
         self.statusBarWidget.addPermanentWidget(self.statusChainageLabel)
         self.statusBarWidget.addPermanentWidget(self.statusThemeLabel)
 
@@ -1251,6 +1308,7 @@ class MainWindow(QMainWindow):
         self.profileWidget.applyTheme(isDark, tokens)
         self.kinematicsWidget.applyTheme(isDark, tokens)
         self.trackStatsWidget.applyTheme(isDark, tokens)
+        self.scenarioMatrixWidget.applyTheme(isDark, tokens)
         self.helpWidget.applyTheme(isDark, tokens)
         self.mapWidget.applyTheme(isDark, tokens)
         self.variantDashboardWidget.applyTheme(isDark, tokens)
@@ -1310,6 +1368,7 @@ class MainWindow(QMainWindow):
         self.refreshGeometryReport()
         self.refreshVehicleReport()
         self.refreshTrackStatsDock()
+        self.dockScenarioMatrix.requestUpdate()
 
     # Rebuild the geometry report in place, but only once the user has actually opened it
     def refreshGeometryReport(self):
@@ -1522,7 +1581,7 @@ class MainWindow(QMainWindow):
 
     # Start an empty project and immediately ask for its identification
     def newProject(self):
-        if self.raisePendingSeamReview():
+        if self.raisePendingSeamReview() or self.warnIfCalculationRunning():
             return
         if not self.confirmDiscardChanges():
             return
@@ -1565,13 +1624,26 @@ class MainWindow(QMainWindow):
             filepath += project_file.PROJECT_EXTENSION
         return self.writeProjectTo(filepath)
 
+    # Build the Karto dataset text and point the payload at it only when it exists, a failure is announced
+    def prepareKartoDataset(self, payload, announceFailure):
+        kartoDataset = self.projectFileManager.collectKartoDataset(self)
+        if kartoDataset:
+            self.projectFileManager.attachKartoPointer(payload)
+        elif announceFailure:
+            lan = self.translationManager.getLanguage(self.currentLanguage)
+            self.statusBarWidget.showMessage(
+                lan.get("statusKartoFailed", "The Karto dataset could not be built, the project was saved without it"),
+                SERIES_STATUS_TIMEOUT * 2)
+        return kartoDataset
+
     # Serialize the whole live project into one .coypu archive
     def writeProjectTo(self, filepath):
         lan = self.translationManager.getLanguage(self.currentLanguage)
         try:
             payload = self.projectFileManager.buildProjectPayload(self)
             rawAssets = self.projectFileManager.collectRawAssets(self)
-            self.projectFileManager.writeProjectArchive(filepath, payload, rawAssets)
+            kartoDataset = self.prepareKartoDataset(payload, True)
+            self.projectFileManager.writeProjectArchive(filepath, payload, rawAssets, kartoDataset)
         except Exception as saveError:
             QMessageBox.critical(self, lan.get("error", "Error"), str(saveError))
             return False
@@ -1589,7 +1661,7 @@ class MainWindow(QMainWindow):
     # Pick a .coypu archive and load it over the current session
     def openProject(self):
         lan = self.translationManager.getLanguage(self.currentLanguage)
-        if not self.confirmDiscardChanges():
+        if self.warnIfCalculationRunning() or not self.confirmDiscardChanges():
             return
         filepath, _ = QFileDialog.getOpenFileName(
             self, lan.get("openProject", "Open Project..."), "",
@@ -1601,7 +1673,7 @@ class MainWindow(QMainWindow):
 
     # Read one .coypu archive and rebuild every dataset, dock, plot and the map from it
     def loadProjectFile(self, filepath, adoptPath=True):
-        if self.raisePendingSeamReview():
+        if self.raisePendingSeamReview() or self.warnIfCalculationRunning():
             return False
         lan = self.translationManager.getLanguage(self.currentLanguage)
         try:
@@ -1638,6 +1710,7 @@ class MainWindow(QMainWindow):
 
         self.rebuildVehicleReportMenus()
         self.rebuildRecentProjectsMenu()
+        self.refreshPatternCombo()
         self.refreshStations()
         self.updateOptimizationActionState()
         self.toggleSlewPlotAction.setChecked(bool(lxml.get("slewProfileOffsetMm") is not None
@@ -1649,6 +1722,7 @@ class MainWindow(QMainWindow):
         self.plotSpeedLimits()
         self.plotKinematics()
         self.refreshTrackStatsDock()
+        self.dockScenarioMatrix.requestUpdate()
 
         if lxml.get("alignmentCoordinates"):
             self.updateMapWithSpeeds()
@@ -1682,7 +1756,7 @@ class MainWindow(QMainWindow):
 
     # Open one entry of the recent projects submenu with the usual unsaved changes guard
     def openRecentProject(self, projectPath):
-        if not self.confirmDiscardChanges():
+        if self.warnIfCalculationRunning() or not self.confirmDiscardChanges():
             return
         QTimer.singleShot(0, lambda: self.loadProjectFile(projectPath))
 
@@ -1740,7 +1814,8 @@ class MainWindow(QMainWindow):
         try:
             payload = self.projectFileManager.buildProjectPayload(self)
             rawAssets = self.projectFileManager.collectRawAssets(self)
-            self.projectFileManager.writeProjectArchive(snapshotPath, payload, rawAssets)
+            kartoDataset = self.prepareKartoDataset(payload, False)
+            self.projectFileManager.writeProjectArchive(snapshotPath, payload, rawAssets, kartoDataset)
         except Exception:
             # A failed snapshot must never interrupt the user, the next tick simply tries again
             return
@@ -1836,6 +1911,9 @@ class MainWindow(QMainWindow):
         if self.simulationController.isRunning():
             self.simulationController.cancelSimulation()
             self.simulationController.waitForFinish()
+        if self.scenarioMatrixController.isRunning():
+            self.scenarioMatrixController.cancelMatrix()
+            self.scenarioMatrixController.waitForFinish()
         self.autoSaveTimer.stop()
         self.discardRecoverySnapshot()
         self.saveSession()
@@ -1914,10 +1992,16 @@ class MainWindow(QMainWindow):
         self.slewReportAction.setText(lan.get("slewReport", "Slew Report"))
         self.toggleSlewPlotAction.setText(lan.get("toggleSlewPlot", "Toggle Slew Plot"))
         self.includeSlewSectionAction.setText(lan.get("includeSlewSection", "Append Slew Summary"))
-        self.reverseDirectionAction.setText(lan.get("runAgainstStationing", "Run against stationing"))
+        self.reverseDirectionAction.setText(lan.get("viewReverseDirection", "Show reverse direction"))
         self.reverseDirectionAction.setToolTip(lan.get(
-            "runAgainstStationingTip",
-            "Drive the whole simulation from the highest chainage towards the lowest"))
+            "viewReverseDirectionTip",
+            "Show the run from the highest chainage towards the lowest, both directions are simulated"))
+        self.scenarioMatrixAction.setText(lan.get("scenarioMatrix", "Scenario matrix..."))
+        self.scheduleSettingsAction.setText(lan.get("scheduleSettings", "Timetable margins..."))
+        self.statusMatrixCancelButton.setText(lan.get("matrixCancel", "Cancel matrix"))
+        self.statusMatrixCancelButton.setToolTip(lan.get(
+            "matrixCancelTip", "Stops the scenario matrix after the current pass"))
+        self.refreshPatternCombo()
         if self.slewReportWindow is not None:
             self.slewReportWindow.updateTexts(lan)
         self.updateUnitsActionLabel()
@@ -1954,6 +2038,7 @@ class MainWindow(QMainWindow):
         self.dockProfile.setWindowTitle(lan.get("dockProfile", "Plots - Profile"))
         self.dockKinematics.setWindowTitle(lan.get("dockKinematics", "Plots - Kinematics"))
         self.dockTrackStats.setWindowTitle(lan.get("dockTrackStats", "Track Statistics"))
+        self.dockScenarioMatrix.setWindowTitle(lan.get("dockScenarioMatrix", "Scenario matrix"))
         self.dockLandXmlRaw.setWindowTitle(lan.get("dockLandXmlRaw", "LandXML - source"))
         self.dockLandXmlParsed.setWindowTitle(lan.get("dockLandXmlParsed", "LandXML - data"))
         self.dockTtpRaw.setWindowTitle(lan.get("dockTtpRaw", "XML TTP - source"))
@@ -1972,6 +2057,7 @@ class MainWindow(QMainWindow):
         self.profileWidget.updateLabels(lan)
         self.kinematicsWidget.updateLabels(lan)
         self.trackStatsWidget.updateTexts(lan)
+        self.scenarioMatrixWidget.updateTexts(lan)
         self.helpWidget.updateTexts(lan)
         self.mapWidget.updateTexts(lan)
         self.variantDashboardWidget.updateLabels(lan)
@@ -3226,6 +3312,11 @@ class MainWindow(QMainWindow):
         self.mapWidget.resetMap()
         self.batchResults.clear()
         self.variantDashboardWidget.clearAll()
+        # The matrix and the statistics belong to the deleted data, so their panels are emptied too
+        self.refreshScenarioMatrixDock()
+        self.dockScenarioMatrix.requestUpdate()
+        self.refreshTrackStatsDock()
+        self.refreshPatternCombo()
         self.setEngineStatus(self.translationManager.getLanguage(self.currentLanguage).get("statusNoData", "No data"))
         self.updateStatusChainage(None)
         self.markProjectModified()
@@ -3492,6 +3583,7 @@ class MainWindow(QMainWindow):
             self.applyRunDirectionToVehicles()
             self.profileState.refreshAvailability(self.dataStorage)
             self.rebuildVehicleReportMenus()
+            self.dockScenarioMatrix.requestUpdate()
             self.markProjectModified()
             # Step 4 of the workflow guide covers the vehicle definition
             self.workflowWidget.markCompleted(3)
@@ -3531,11 +3623,16 @@ class MainWindow(QMainWindow):
 
         if request["purgeStops"]:
             self.cleanTTPData()
-            self.dataStorage.setdefault("settingsData", {})["trainStops"] = []
+            purgedSettings = self.dataStorage.setdefault("settingsData", {})
+            purgedSettings["trainStops"] = []
+            purgedSettings["stopRecords"] = []
+            stops_model.syncTrainStops(purgedSettings)
 
+        self.refreshPatternCombo()
         self.refreshStations()
         self.plotKinematics()
         self.refreshTrackStatsDock()
+        self.dockScenarioMatrix.requestUpdate()
         self.markProjectModified()
         self.statusBarWidget.showMessage(lan.get("purgeDone", "Purge completed"), SERIES_STATUS_TIMEOUT)
 
@@ -3546,6 +3643,10 @@ class MainWindow(QMainWindow):
         self.mapWidget.clearViewState()
         self.dataStorage["settingsData"] = copy.deepcopy(default_values.defVal)
         self.mapWidget.resetMap()
+        self.refreshPatternCombo()
+        self.refreshScenarioMatrixDock()
+        self.dockScenarioMatrix.requestUpdate()
+        self.refreshTrackStatsDock()
 
         lan = self.translationManager.getLanguage(self.currentLanguage)
         self.statusBarWidget.showMessage(lan.get("purgeDone", "Purge completed"), SERIES_STATUS_TIMEOUT)
@@ -3598,9 +3699,10 @@ class MainWindow(QMainWindow):
     # Enable or disable every action that would otherwise race a running batch against dataStorage
     def setBatchActionsEnabled(self, isEnabled):
         for actionName in ("calculateGeometryAction", "calculateGeometryIAction", "calculateTrainSpeedAction",
-                          "cleanDataAction", "openPurgeDialogAction", "openBatchProcessingAction",
-                          "exportBatchArchiveAction"):
+                          "scenarioMatrixAction", "cleanDataAction", "openPurgeDialogAction",
+                          "openBatchProcessingAction", "exportBatchArchiveAction"):
             getattr(self, actionName).setEnabled(isEnabled)
+        self.ribbonPatternCombo.setEnabled(isEnabled)
 
     # Merge the configured LandXML files, expand the variant matrix, and hand it to the batch controller
     def startBatchRun(self, batchConfigData):
@@ -3643,6 +3745,8 @@ class MainWindow(QMainWindow):
         self.variantDashboardWidget.setResults(self.batchResults)
         self.refreshBatchVariantSelector()
         self.setBatchActionsEnabled(True)
+        # The flat arrays must describe the direction that is shown, whatever was toggled meanwhile
+        self.applyActiveProfileResults()
 
         failedCount = sum(1 for result in results if result["status"] == "failed")
         cancelledCount = sum(1 for result in results if result["status"] == "cancelled")
@@ -3660,6 +3764,7 @@ class MainWindow(QMainWindow):
     def onBatchFailed(self, message):
         lan = self.translationManager.getLanguage(self.currentLanguage)
         self.setBatchActionsEnabled(True)
+        self.applyActiveProfileResults()
         if self.batchProgressDialog is not None:
             self.batchProgressDialog.finish(lan.get("batchFailed", "Batch failed"))
         QMessageBox.critical(self, lan.get("error", "Error"), message)
@@ -3718,15 +3823,182 @@ class MainWindow(QMainWindow):
     # Stops settings
     def openStopsSettings(self):
         lan = self.translationManager.getLanguage(self.currentLanguage)
-        dialog = gui_overlay.StopsSettingsDialog(self.dataStorage.get("settingsData", {}), lan, self)
+        settingsData = self.dataStorage.setdefault("settingsData", {})
+        previousStops = copy.deepcopy(settingsData.get("trainStops", []))
+        stopKeys = ("stopRecords", "activeStopPattern", "spPopulationThreshold", "isSpThresholdAuto",
+                    "defaultDwellTime")
+        previousState = copy.deepcopy({key: settingsData.get(key) for key in stopKeys})
+        dialog = gui_overlay.StopsSettingsDialog(settingsData, lan, self)
         if dialog.exec():
-            self.dataStorage["settingsData"].update(dialog.getSettings())
+            settingsData.update(dialog.getSettings())
+            stops_model.syncTrainStops(settingsData)
+            # An OK without any edit changes nothing, so it neither marks the project nor re-runs anything
+            if {key: settingsData.get(key) for key in stopKeys} == previousState:
+                return
             # Step 3 of the workflow guide covers the scheduled stops
             self.workflowWidget.markCompleted(2)
-            # New stops must reach the map and both station aware plots
-            self.refreshStations()
-            self.plotKinematics()
+            self.onStopsChanged(previousStops)
+
+    # Everything that follows new stops or another active pattern, whichever control changed them
+    def onStopsChanged(self, previousStops):
+        settingsData = self.dataStorage.setdefault("settingsData", {})
+        # New stops must reach the map and both station aware plots
+        self.refreshStations()
+        self.plotKinematics()
+        self.refreshPatternCombo()
+        self.dockScenarioMatrix.requestUpdate()
+        self.markProjectModified()
+        # A changed pattern or stop list re-runs an existing simulation
+        if (settingsData.get("trainStops", []) != previousStops and self.simulationResultsByProfile
+                and not self.isCalculationRunning()):
+            self.calculateTrainSpeed()
+
+    # The ribbon selector picked another stopping pattern, same effect as the dialog's own combo
+    def onRibbonPatternChanged(self, index):
+        patternKey = self.ribbonPatternCombo.currentData()
+        settingsData = self.dataStorage.setdefault("settingsData", {})
+        if patternKey is None or patternKey == settingsData.get("activeStopPattern"):
+            return
+        previousStops = copy.deepcopy(settingsData.get("trainStops", []))
+        settingsData["activeStopPattern"] = patternKey
+        stops_model.syncTrainStops(settingsData)
+        self.onStopsChanged(previousStops)
+
+    # Rebuild the ribbon pattern selector from the stop records, with the stop count of every pattern
+    def refreshPatternCombo(self):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        settingsData = self.dataStorage.get("settingsData", {}) or {}
+        records = stops_model.normalizeStopRecords(settingsData.get("stopRecords"))
+        counts = stops_model.patternStopCounts(records)
+        activeKey = stops_model.normalizePatternKey(settingsData.get("activeStopPattern"))
+
+        self.ribbonPatternLabel.setText(lan.get("ribbonPatternLabel", "Stopping pattern"))
+        self.ribbonPatternCombo.setToolTip(lan.get(
+            "activeStopPatternTip", "Pattern used by the simulation, the map and the statistics"))
+        self.ribbonPatternCombo.blockSignals(True)
+        self.ribbonPatternCombo.clear()
+        for patternKey in stops_model.PATTERN_KEYS:
+            self.ribbonPatternCombo.addItem(
+                f"{patternCaptionFor(lan, patternKey)} ({stopsCountText(lan, counts[patternKey])})", patternKey)
+        self.ribbonPatternCombo.setCurrentIndex(max(0, self.ribbonPatternCombo.findData(activeKey)))
+        self.ribbonPatternCombo.blockSignals(False)
+
+    # Recovery margins and rounding of the scheduled travel time
+    def openScheduleSettings(self):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        settingsData = self.dataStorage.setdefault("settingsData", {})
+        dialog = gui_overlay.ScheduleSettingsDialog(settingsData, lan, self)
+        if dialog.exec():
+            settingsData.update(dialog.getSettings())
+            # Scheduled values are computed from the cached raw ones, so nothing is re-simulated
+            self.refreshTrackStatsDock()
+            self.dockScenarioMatrix.requestUpdate()
             self.markProjectModified()
+
+    # True while a simulation, a batch or a matrix run owns the data storage
+    def isCalculationRunning(self):
+        return (self.simulationController.isRunning() or self.batchController.isRunning()
+                or self.scenarioMatrixController.isRunning()
+                or self.optimizationController.isRunning())
+
+    # Tell the user why a project level action waits, returns True when a calculation owns the data
+    def warnIfCalculationRunning(self):
+        if not self.isCalculationRunning():
+            return False
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        QMessageBox.warning(self, lan.get("error", "Error"),
+                            lan.get("calculationBusy", "Wait for the running calculation to finish"))
+        return True
+
+    # Reopen the matrix dialog with the selection of the stored matrix
+    def rerunScenarioMatrix(self):
+        matrix = self.dataStorage.get(scenario_matrix.MATRIX_STORAGE_KEY) or {}
+        self.openScenarioMatrix(initialRequest={
+            "profileKeys": matrix.get("profileKeys", []), "vehicleIndices": matrix.get("vehicleIndices", []),
+            "patternKeys": matrix.get("patternKeys", [])})
+
+    # Choose what a matrix run covers and start it on the worker thread
+    def openScenarioMatrix(self, checked=False, initialRequest=None):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        if self.warnIfCalculationRunning():
+            return
+
+        vehicles = scenario_matrix.matrixVehicles(self.dataStorage.get("settingsData", {}))
+        if not simulation_runner.evaluableProfileKeys(self.dataStorage, vehicles):
+            headline = lan.get("statusSimulationNoProfile", "No speed profile is available to simulate")
+            self.setEngineStatus(headline)
+            QMessageBox.warning(self, lan.get("error", "Error"), headline)
+            return
+
+        dialog = ScenarioMatrixDialog(self.dataStorage, lan, self, initialRequest)
+        if dialog.exec():
+            request = dialog.getRequest()
+            # Deferred so the closing modal never overlaps starting the worker thread
+            QTimer.singleShot(0, lambda: self.startScenarioMatrix(request))
+
+    # Hand the request to the controller and show the progress in the status bar
+    def startScenarioMatrix(self, request):
+        if self.isCalculationRunning():
+            return
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        passCount = scenario_matrix.countEnginePasses(len(request["patternKeys"]),
+                                                      len(request["profileKeys"]))
+        # The job is built before anything is locked, so a failure leaves every action usable
+        try:
+            self.scenarioMatrixController.startMatrix(
+                self.dataStorage, request["profileKeys"], request["vehicleIndices"],
+                request["patternKeys"], self.lastCalculationMode)
+        except Exception as startError:
+            QMessageBox.critical(self, lan.get("error", "Error"), str(startError))
+            return
+        self.setBatchActionsEnabled(False)
+        self.statusSimulationProgress.setMaximum(max(passCount, 1))
+        self.statusSimulationProgress.setValue(0)
+        self.statusSimulationProgress.show()
+        self.statusMatrixCancelButton.show()
+
+    # One engine pass finished, the status bar advances without blocking the event loop
+    def onScenarioMatrixProgress(self, completedCount, totalCount):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        self.statusSimulationProgress.setMaximum(max(totalCount, 1))
+        self.statusSimulationProgress.setValue(completedCount)
+        template = lan.get("statusMatrixProgress", "Scenario matrix: pass {index} of {count}")
+        self.setEngineStatus(template.format(index=min(completedCount + 1, totalCount),
+                                             count=totalCount))
+
+    # Store the finished matrix in the data storage, a cancelled run leaves the previous one untouched
+    def onScenarioMatrixFinished(self, payload):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        self.setBatchActionsEnabled(True)
+        self.statusSimulationProgress.hide()
+        self.statusMatrixCancelButton.hide()
+        # The flat arrays must describe the direction that is shown, whatever was toggled meanwhile
+        self.applyActiveProfileResults()
+
+        if payload.get("wasCancelled"):
+            self.setEngineStatus(lan.get("statusMatrixCancelled", "Scenario matrix cancelled"))
+            return
+
+        self.dataStorage[scenario_matrix.MATRIX_STORAGE_KEY] = {
+            keyName: value for keyName, value in payload.items() if keyName != "wasCancelled"}
+        self.dockScenarioMatrix.requestUpdate()
+        self.dockScenarioMatrix.show()
+        self.dockScenarioMatrix.raise_()
+        self.setEngineStatus(lan.get("statusMatrixDone", "Scenario matrix finished"))
+        self.markProjectModified()
+
+    def onScenarioMatrixFailed(self, message):
+        lan = self.translationManager.getLanguage(self.currentLanguage)
+        self.setBatchActionsEnabled(True)
+        self.statusSimulationProgress.hide()
+        self.statusMatrixCancelButton.hide()
+        self.applyActiveProfileResults()
+        self.setEngineStatus(lan.get("matrixFailed", "Scenario matrix failed"))
+        QMessageBox.critical(self, lan.get("error", "Error"), str(message))
+
+    # Repaint the matrix panel from the current data storage
+    def refreshScenarioMatrixDock(self):
+        self.scenarioMatrixWidget.setData(self.dataStorage)
 
     # Speed settings
     def openSpeedSettings(self):
@@ -4939,12 +5211,41 @@ class MainWindow(QMainWindow):
         simulation_runner.applyRunDirection(settingsData,
                                             self.reverseDirectionAction.isChecked())
 
-    # The ribbon toggle owns the travel direction, so a cached run is no longer valid for it
+    # Direction key of the direction the plots and the statistics currently show
+    def viewedDirectionKey(self):
+        return simulation_runner.directionKeyFor(simulation_runner.isRunReversed(self.dataStorage))
+
+    # True when the active tier holds the viewed direction in the cache
+    def isViewedDirectionCached(self):
+        tierResults = self.simulationResultsByProfile.get(self.profileState.activeProfileKey) or {}
+        return bool(tierResults.get(self.viewedDirectionKey()))
+
+    # The ribbon toggle only picks the shown direction, both are cached so nothing is re-simulated
     def onRunDirectionToggled(self, isChecked):
+        previousReversed = simulation_runner.isRunReversed(self.dataStorage)
         self.applyRunDirectionToVehicles()
-        self.markProjectModified()
-        # Re-running keeps the plots, the statistics and the cache describing the same journey
-        if self.simulationResultsByProfile and not self.simulationController.isRunning():
+        if not self.simulationResultsByProfile:
+            self.markProjectModified()
+            return
+
+        if self.isViewedDirectionCached():
+            self.markProjectModified()
+            self.applyActiveProfileResults()
+            # The same follow-up refresh the old re-run triggered: impact, reports and statistics
+            self.vehicleCalculationFinished.emit()
+        elif self.isCalculationRunning():
+            # A missing direction needs an engine run that cannot start now, so the toggle goes back
+            lan = self.translationManager.getLanguage(self.currentLanguage)
+            self.reverseDirectionAction.blockSignals(True)
+            self.reverseDirectionAction.setChecked(previousReversed)
+            self.reverseDirectionAction.blockSignals(False)
+            self.applyRunDirectionToVehicles()
+            self.setEngineStatus(lan.get(
+                "statusDirectionBusy",
+                "That direction is not calculated yet, wait for the running calculation to finish"))
+        else:
+            # A direction missing from the cache, as after reopening a project, needs one fresh run
+            self.markProjectModified()
             self.calculateTrainSpeed()
 
     # Mirror the stored direction into the ribbon toggle without echoing a project modification back
@@ -4958,7 +5259,7 @@ class MainWindow(QMainWindow):
     # Evaluate every drivable speed profile tier in one click, on a worker thread
     def calculateTrainSpeed(self):
         lan = self.translationManager.getLanguage(self.currentLanguage)
-        if self.simulationController.isRunning():
+        if self.simulationController.isRunning() or self.scenarioMatrixController.isRunning():
             return
 
         vehicles = profile_state.vehicleSettingsList(self.dataStorage)
@@ -4977,7 +5278,8 @@ class MainWindow(QMainWindow):
             return
 
         self.setBatchActionsEnabled(False)
-        self.statusSimulationProgress.setMaximum(len(profileKeys))
+        # Every tier runs once per direction, so the bar counts two passes per tier
+        self.statusSimulationProgress.setMaximum(len(profileKeys) * len(simulation_runner.DIRECTION_KEYS))
         self.statusSimulationProgress.setValue(0)
         self.statusSimulationProgress.show()
         # Stops are projected here on the GUI thread, only the worker's own copy ever carries them
@@ -5065,11 +5367,11 @@ class MainWindow(QMainWindow):
         if not self.simulationResultsByProfile:
             return
 
-        profileResults = self.simulationResultsByProfile.get(
-            self.profileState.activeProfileKey) or {}
+        tierResults = self.simulationResultsByProfile.get(self.profileState.activeProfileKey) or {}
+        directionResults = tierResults.get(self.viewedDirectionKey()) or {}
 
         for vehicleIndex in range(vehicle_catalog.MAX_VEHICLES):
-            vehicleResults = profileResults.get(str(vehicleIndex)) or {}
+            vehicleResults = directionResults.get(str(vehicleIndex)) or {}
             for resultKey in simulation_runner.PROFILE_RESULT_KEYS:
                 # A missing entry writes an empty array, so the previous tier can never linger
                 values = vehicleResults.get(resultKey)
@@ -5101,8 +5403,10 @@ class MainWindow(QMainWindow):
                 f"kinematicsWarning_{vehicleIndex}")
             resultsByVehicle[str(vehicleIndex)] = vehicleResults
 
-        # Only the saved tier can be restored, the others need a fresh Simulate to be populated
-        self.simulationResultsByProfile = {activeProfileKey: resultsByVehicle} if hasAnyResult else {}
+        # Only the saved tier and direction can be restored, the others need a fresh Simulate
+        savedDirectionKey = self.viewedDirectionKey()
+        self.simulationResultsByProfile = ({activeProfileKey: {savedDirectionKey: resultsByVehicle}}
+                                           if hasAnyResult else {})
         self.profileState.setActiveProfile(activeProfileKey)
 
     # Every synchronised profile selector, so one loop keeps the ribbon and both docks in step

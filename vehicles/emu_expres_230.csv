@@ -1,0 +1,15 @@
+Section,Col1,Col2,Col3,Col4,Col5,Col6
+Meta,vehicleName,Expres (230 km/h)
+Meta,maxSpeedKmh,230
+Meta,massTonnes,400
+Meta,lengthM,200
+Meta,brakeDecelMs2,0.50
+Meta,maxTractiveForceKN,300
+Meta,rotMassFactor,1.06
+Meta,maxCantDeficiencyMm,150
+Param,Expres (230 km/h),1.06,400,200
+Res,Expres (230 km/h),1.25,0.0055,0.000165
+Trac,Expres (230 km/h),0,72,300,0,0
+Trac,Expres (230 km/h),72,110,739.0755869,-8.304744317,0.03064544829
+Trac,Expres (230 km/h),110,160,494.1797624,-3.725020116,0.009250916254
+Trac,Expres (230 km/h),160,230,341.5108271,-1.78024825,0.00305972238

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
 
 import default_values
 import readfile
+import stops_model
 from plot_widgets import CoypuPlotWidget
 from ui_kit import CollapsibleSection, MetricCard
 from vehicle_catalog import (CatalogVehicle, DEFAULT_MAX_CANT_DEFICIENCY_MM,
@@ -265,6 +266,18 @@ class VehicleTab(QWidget):
         gridLayout.addWidget(QLabel(lan.get("speed_profile", "Speed Profile:")), 5, 0)
         gridLayout.addWidget(self.comboProfile, 5, 1)
 
+        # Empty labels resolve automatically to origin and destination of that direction
+        storedLabels = stops_model.normalizeDirectionLabels(self.vehicleData.get("directionLabels"))
+        labelPlaceholder = lan.get("directionLabelPlaceholder", "Automatic: origin → destination")
+        self.inputDirectionLabelForward = QLineEdit(storedLabels["forward"])
+        self.inputDirectionLabelForward.setPlaceholderText(labelPlaceholder)
+        self.inputDirectionLabelReverse = QLineEdit(storedLabels["reverse"])
+        self.inputDirectionLabelReverse.setPlaceholderText(labelPlaceholder)
+        gridLayout.addWidget(QLabel(lan.get("directionLabelForward", "Forward label (rising chainage):")), 6, 0)
+        gridLayout.addWidget(self.inputDirectionLabelForward, 6, 1, 1, 3)
+        gridLayout.addWidget(QLabel(lan.get("directionLabelReverse", "Reverse label (falling chainage):")), 7, 0)
+        gridLayout.addWidget(self.inputDirectionLabelReverse, 7, 1, 1, 3)
+
         outerLayout.addLayout(gridLayout)
 
         toolbarLayoutVehicle = QHBoxLayout()
@@ -393,6 +406,20 @@ class VehicleTab(QWidget):
 
         self.refreshCurve()
 
+    # Empty both direction labels, used when another vehicle replaces the one they described
+    def clearDirectionLabels(self):
+        self.inputDirectionLabelForward.clear()
+        self.inputDirectionLabelReverse.clear()
+
+    # Apply a catalog vehicle and show it in the catalog combo without re-triggering the selection
+    def selectCatalogVehicle(self, catalogVehicle):
+        self.applyCatalogVehicle(catalogVehicle)
+        matchIndex = self.comboCatalog.findData(catalogVehicle.vehicleName)
+        if matchIndex >= 0:
+            self.comboCatalog.blockSignals(True)
+            self.comboCatalog.setCurrentIndex(matchIndex)
+            self.comboCatalog.blockSignals(False)
+
     # Import an extended or legacy vehicle CSV and apply it to this tab
     def importVehicleCSV(self):
         filepath, _ = QFileDialog.getOpenFileName(
@@ -443,6 +470,10 @@ class VehicleTab(QWidget):
             "trainParam": [],
             # The travel direction belongs to the run, so the ribbon toggle owns it and this preserves it
             "runReversed": bool(self.vehicleData.get("runReversed", False)),
+            "directionLabels": {
+                "forward": self.inputDirectionLabelForward.text().strip(),
+                "reverse": self.inputDirectionLabelReverse.text().strip(),
+            },
         }
 
         # A None entry means this vehicle follows the shared tier, so it carries no pinned profile
@@ -536,6 +567,12 @@ class VehicleSettingsDialog(QDialog):
         self.btnBrowseCatalog = QPushButton(lan.get("browseCatalog", "Browse catalog..."))
         self.btnBrowseCatalog.clicked.connect(self.browseCatalog)
         headerLayout.addWidget(self.btnBrowseCatalog)
+        self.btnLoadBaselineTrio = QPushButton(lan.get("loadBaselineTrio", "Load baseline trio"))
+        self.btnLoadBaselineTrio.setToolTip(lan.get(
+            "loadBaselineTrioTip",
+            "Set three vehicles from the catalog: regional DMU, battery unit and 230 km/h express"))
+        self.btnLoadBaselineTrio.clicked.connect(self.loadBaselineTrio)
+        headerLayout.addWidget(self.btnLoadBaselineTrio)
         layout.addLayout(headerLayout)
 
         self.tabs = QTabWidget()
@@ -586,7 +623,10 @@ class VehicleSettingsDialog(QDialog):
         if newCount > currentCount:
             for _ in range(newCount - currentCount):
                 lastTab = self.tabs.widget(self.tabs.count() - 1) if self.tabs.count() > 0 else None
-                self.addTab(lastTab.getSettings() if lastTab is not None else {})
+                newSettings = lastTab.getSettings() if lastTab is not None else {}
+                # A copied vehicle must not inherit the direction labels of the one it was cloned from
+                newSettings["directionLabels"] = stops_model.normalizeDirectionLabels(None)
+                self.addTab(newSettings)
         elif newCount < currentCount:
             for _ in range(currentCount - newCount):
                 self.tabs.removeTab(self.tabs.count() - 1)
@@ -613,12 +653,46 @@ class VehicleSettingsDialog(QDialog):
         if catalogVehicle is None or currentTab is None:
             return
 
-        currentTab.applyCatalogVehicle(catalogVehicle)
-        matchIndex = currentTab.comboCatalog.findData(catalogVehicle.vehicleName)
-        if matchIndex >= 0:
-            currentTab.comboCatalog.blockSignals(True)
-            currentTab.comboCatalog.setCurrentIndex(matchIndex)
-            currentTab.comboCatalog.blockSignals(False)
+        currentTab.selectCatalogVehicle(catalogVehicle)
+
+    # Names the trio button applies, from the project settings with the bundled default as fallback
+    def baselineVehicleNames(self):
+        names = self.settingsData.get("baselineVehicleNames")
+        if not names:
+            names = default_values.defVal["baselineVehicleNames"]
+        return [str(name) for name in names][:MAX_VEHICLES]
+
+    # Set one vehicle per baseline name from the catalog and warn about every name it does not hold
+    def loadBaselineTrio(self):
+        if self.catalog is None:
+            return
+
+        names = self.baselineVehicleNames()
+        # The trio replaces the first vehicles and trims the rest, so the user confirms first
+        answer = QMessageBox.question(
+            self, self.lan.get("loadBaselineTrio", "Load baseline trio"),
+            self.lan.get("loadBaselineTrioConfirm",
+                         "This sets exactly three vehicles from the catalog and overwrites vehicles 1 to 3. Continue?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.countSpin.setValue(len(names))
+
+        missingNames = []
+        for index, vehicleName in enumerate(names):
+            catalogVehicle = self.catalog.vehicleByName(vehicleName)
+            if catalogVehicle is None:
+                missingNames.append(vehicleName)
+                continue
+            self.tabs.widget(index).selectCatalogVehicle(catalogVehicle)
+            self.tabs.widget(index).clearDirectionLabels()
+
+        if missingNames:
+            QMessageBox.warning(
+                self, self.lan.get("error", "Error"),
+                self.lan.get("baselineTrioMissing",
+                             "These vehicles are missing from the catalog:") + "\n" + "\n".join(missingNames))
 
     # Collect the settings of every active tab
     def getSettings(self):

@@ -127,6 +127,7 @@ class CatalogVehicle:
         settings.setdefault("trainInitialSpeed", 0.0)
         settings.setdefault("trainFinalSpeed", 0.0)
         settings.setdefault("runReversed", False)
+        settings.setdefault("directionLabels", {"forward": "", "reverse": ""})
         settings.setdefault("speedLimitPlot", list(DEFAULT_SPEED_LIMIT_PLOT))
         return settings
 

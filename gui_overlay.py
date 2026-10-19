@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
                                QLineEdit, QTableWidget, QTableWidgetItem,
                                QHeaderView, QFileDialog, QMessageBox,
                                QDialogButtonBox, QPushButton, QComboBox,
-                               QDoubleSpinBox, QSlider, QSpinBox, QWidget)
+                               QDoubleSpinBox, QGridLayout, QSlider, QSpinBox, QWidget)
 from PySide6.QtCore import Qt, Signal
 
 import numpy as np
@@ -19,6 +19,8 @@ import readfile
 import io
 import default_values
 import geometry_engine
+import schedule_rules
+import stops_model
 
 # Extra headroom around a symmetric popup axis, replaces the old setYRange padding argument
 POPUP_RANGE_HEADROOM = 1.05
@@ -909,39 +911,105 @@ class AlignmentOptimizationDialog(QDialog):
         }
 
 
+# Table columns of the stops dialog
+STOPS_COL_NAME = 0
+STOPS_COL_KM = 1
+STOPS_COL_DWELL = 2
+STOPS_COL_MUNICIPALITY = 3
+STOPS_COL_POPULATION = 4
+STOPS_COL_FIRST_PATTERN = 5
+
+# Item data role carrying the stable stop id and the manual override flag of an Sp or Ex cell
+STOP_ID_ROLE = Qt.ItemDataRole.UserRole
+MANUAL_FLAG_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+# Number as the shortest text that reads back as exactly the same float, so an untouched cell never drifts
+def exactNumberText(value):
+    return stops_model.formatCsvNumber(value)
+
+
 class StopsSettingsDialog(QDialog):
     def __init__(self, settingsData, lan, parent=None):
         super().__init__(parent)
         self.settingsData = settingsData
-        
+        self.lan = lan
+        self.isPopulating = False
+
         self.setWindowTitle(lan.get("stopsSettings", "Stops Settings"))
-        self.setMinimumSize(400, 400)
+        self.setMinimumSize(900, 520)
 
         layout = QVBoxLayout(self)
-        
+
         formLayout = QFormLayout()
         self.inputDwellTime = QLineEdit(str(self.settingsData.get("defaultDwellTime", 30.0)))
         formLayout.addRow(QLabel(lan.get("defaultDwellTime", "Default Dwell Time [s]:")), self.inputDwellTime)
+
+        self.comboActivePattern = QComboBox()
+        for patternKey in stops_model.PATTERN_KEYS:
+            self.comboActivePattern.addItem(self.patternCaption(patternKey), patternKey)
+        self.comboActivePattern.setCurrentIndex(max(0, self.comboActivePattern.findData(
+            stops_model.normalizePatternKey(self.settingsData.get("activeStopPattern")))))
+        self.comboActivePattern.setToolTip(lan.get(
+            "activeStopPatternTip", "Pattern used by the simulation, the map and the statistics"))
+        formLayout.addRow(QLabel(lan.get("activeStopPattern", "Active stopping pattern:")),
+                          self.comboActivePattern)
+
+        thresholdLayout = QHBoxLayout()
+        self.spinSpThreshold = QSpinBox()
+        self.spinSpThreshold.setRange(0, 10000000)
+        self.spinSpThreshold.setSingleStep(100)
+        self.spinSpThreshold.setValue(int(self.settingsData.get(
+            "spPopulationThreshold", stops_model.DEFAULT_SP_POPULATION_THRESHOLD)))
+        self.spinSpThreshold.setToolTip(lan.get(
+            "spThresholdTip", "Population from which a stop joins the Sp pattern, applied live to every row without a manual Sp tick"))
+        self.checkSpThresholdAuto = QCheckBox(lan.get("spThresholdAuto", "Automatic"))
+        self.checkSpThresholdAuto.setToolTip(lan.get(
+            "spThresholdAutoTip",
+            "Stops in the Sp pattern are the line endpoints and every stop at or above the population threshold"))
+        self.checkSpThresholdAuto.setChecked(bool(self.settingsData.get("isSpThresholdAuto", True)))
+        self.spinSpThreshold.setEnabled(self.checkSpThresholdAuto.isChecked())
+        thresholdLayout.addWidget(self.spinSpThreshold)
+        thresholdLayout.addWidget(self.checkSpThresholdAuto)
+        self.btnResetOverrides = QPushButton(lan.get("spResetOverrides", "Reset overrides"))
+        self.btnResetOverrides.setToolTip(lan.get(
+            "spResetOverridesTip", "Clear every manual Sp and Ex tick and apply the automatic rules again"))
+        self.btnResetOverrides.setEnabled(self.checkSpThresholdAuto.isChecked())
+        thresholdLayout.addWidget(self.btnResetOverrides)
+        thresholdLayout.addStretch(1)
+        formLayout.addRow(QLabel(lan.get("spPopulationThreshold", "Sp population threshold:")),
+                          thresholdLayout)
+
+        self.labelCounters = QLabel()
+        formLayout.addRow(QLabel(lan.get("stopsPerPattern", "Stops per pattern:")), self.labelCounters)
         layout.addLayout(formLayout)
 
-        labelStops = QLabel(lan.get("trainStops", "Train Stops"))
-        layout.addWidget(labelStops)
-
-        self.tableStops = QTableWidget(0, 3)
-        self.tableStops.setHorizontalHeaderLabels([
-            lan["station"],
+        self.tableStops = QTableWidget(0, STOPS_COL_FIRST_PATTERN + len(stops_model.PATTERN_KEYS))
+        headerLabels = [
+            lan.get("stopName", "Stop Name"),
+            lan.get("stopStationingColumn", "Stationing [km]"),
             lan.get("dwellTimeTable", "Dwell Time [s]"),
-            lan.get("stopName", "Stop Name")
-        ])
+            lan.get("stopMunicipality", "Municipality"),
+            lan.get("stopPopulation", "Population"),
+        ]
+        headerLabels += [lan.get(f"stopColumn{patternKey}", patternKey)
+                         for patternKey in stops_model.PATTERN_KEYS]
+        self.tableStops.setHorizontalHeaderLabels(headerLabels)
         headerStops = self.tableStops.horizontalHeader()
-        headerStops.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        headerStops.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        headerStops.setSectionResizeMode(STOPS_COL_NAME, QHeaderView.ResizeMode.Stretch)
+        headerStops.setSectionResizeMode(STOPS_COL_MUNICIPALITY, QHeaderView.ResizeMode.Stretch)
+        for column in (STOPS_COL_KM, STOPS_COL_DWELL, STOPS_COL_POPULATION):
+            headerStops.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        for column in range(STOPS_COL_FIRST_PATTERN, self.tableStops.columnCount()):
+            headerStops.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.tableStops)
+        self.refreshPatternHeaders()
 
-        defaultStops = self.settingsData.get("trainStops", [])
-        self.populateTable(self.tableStops, defaultStops)
+        self.populateRecords(self.initialRecords())
 
         toolbarLayoutStops = QHBoxLayout()
-        
+
         self.btnAddStop = QPushButton(lan.get("addRow", "Add Row"))
         self.btnAddStop.clicked.connect(self.addStopRow)
         toolbarLayoutStops.addWidget(self.btnAddStop)
@@ -951,84 +1019,366 @@ class StopsSettingsDialog(QDialog):
         toolbarLayoutStops.addWidget(self.btnRemoveStop)
 
         self.btnImportStops = QPushButton(lan["importCSV"])
-        self.btnImportStops.clicked.connect(lambda: self.importCSV("tableStops"))
+        self.btnImportStops.clicked.connect(self.importCSV)
         toolbarLayoutStops.addWidget(self.btnImportStops)
 
         self.btnExportStops = QPushButton(lan["exportCSV"])
-        self.btnExportStops.clicked.connect(lambda: self.exportCSV("tableStops"))
+        self.btnExportStops.clicked.connect(self.exportCSV)
         toolbarLayoutStops.addWidget(self.btnExportStops)
 
         layout.addLayout(toolbarLayoutStops)
+
+        self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttonBox.accepted.connect(self.onAccept)
+        self.buttonBox.rejected.connect(self.reject)
+        layout.addWidget(self.buttonBox)
+
+        self.tableStops.itemChanged.connect(self.onItemChanged)
+        self.spinSpThreshold.valueChanged.connect(self.onSpRuleChanged)
+        self.checkSpThresholdAuto.toggled.connect(self.onSpAutoToggled)
+        self.btnResetOverrides.clicked.connect(self.onResetOverrides)
+        self.comboActivePattern.currentIndexChanged.connect(self.refreshPatternHeaders)
+        self.updateCounters()
+
+    # Caption of one pattern in the active pattern combo
+    def patternCaption(self, patternKey):
+        defaultCaptions = {"Os": "Os (local)", "Sp": "Sp (semi-fast)", "Ex": "Ex (express)"}
+        return self.lan.get(f"stopPattern{patternKey}", defaultCaptions[patternKey])
+
+    # Full pattern names as header tooltips, and the header of the active pattern in bold
+    def refreshPatternHeaders(self, index=None):
+        activeKey = self.comboActivePattern.currentData()
+        for offset, patternKey in enumerate(stops_model.PATTERN_KEYS):
+            headerItem = self.tableStops.horizontalHeaderItem(STOPS_COL_FIRST_PATTERN + offset)
+            if headerItem is None:
+                continue
+            isActive = patternKey == activeKey
+            tipText = self.patternCaption(patternKey)
+            if isActive:
+                tipText += " - " + self.lan.get("stopPatternActiveMark", "active pattern")
+            headerItem.setToolTip(tipText)
+            headerFont = headerItem.font()
+            headerFont.setBold(isActive)
+            headerFont.setUnderline(isActive)
+            headerItem.setFont(headerFont)
+
+    # Stored stop records, a project that only holds the legacy list is migrated on the fly
+    def initialRecords(self):
+        records = stops_model.normalizeStopRecords(self.settingsData.get("stopRecords"))
+        if not records and self.settingsData.get("trainStops"):
+            records = stops_model.recordsFromLegacyStops(
+                self.settingsData["trainStops"], self.spinSpThreshold.value())
+        return records
+
+    # Fill the table from a record list without triggering the edit handlers
+    def populateRecords(self, records):
+        self.isPopulating = True
+        self.tableStops.setRowCount(len(records))
+        for row, record in enumerate(records):
+            self.writeRow(row, record)
+        self.isPopulating = False
+
+    # Italic text and a tooltip mark a pattern cell the user decided by hand
+    def styleManualCell(self, item, isManual):
+        cellFont = item.font()
+        cellFont.setItalic(bool(isManual))
+        item.setFont(cellFont)
+        item.setToolTip(self.lan.get("stopManualOverride", "Manual override") if isManual else "")
+
+    # Write one record into one table row
+    def writeRow(self, row, record):
+        nameItem = QTableWidgetItem(record["stopName"])
+        nameItem.setData(STOP_ID_ROLE, record["stopId"])
+        self.tableStops.setItem(row, STOPS_COL_NAME, nameItem)
+        self.tableStops.setItem(row, STOPS_COL_KM, QTableWidgetItem(exactNumberText(record["stationingKm"])))
+        self.tableStops.setItem(row, STOPS_COL_DWELL, QTableWidgetItem(exactNumberText(record["dwellTimeS"])))
+        self.tableStops.setItem(row, STOPS_COL_MUNICIPALITY, QTableWidgetItem(record["municipalityName"]))
+        population = record["population"]
+        self.tableStops.setItem(row, STOPS_COL_POPULATION,
+                                QTableWidgetItem("" if population is None else str(population)))
+        for offset, patternKey in enumerate(stops_model.PATTERN_KEYS):
+            flagItem = QTableWidgetItem()
+            flagItem.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            flagItem.setCheckState(Qt.CheckState.Checked if record[stops_model.patternFlagKey(patternKey)]
+                                   else Qt.CheckState.Unchecked)
+            if patternKey in ("Sp", "Ex"):
+                isManual = bool(record[f"{stops_model.patternFlagKey(patternKey)}IsManual"])
+                flagItem.setData(MANUAL_FLAG_ROLE, isManual)
+                self.styleManualCell(flagItem, isManual)
+            self.tableStops.setItem(row, STOPS_COL_FIRST_PATTERN + offset, flagItem)
+
+    # Pattern cell of one row
+    def patternItem(self, row, patternKey):
+        return self.tableStops.item(row, STOPS_COL_FIRST_PATTERN + stops_model.PATTERN_KEYS.index(patternKey))
+
+    # Text of one cell, empty when the item is missing
+    def cellText(self, row, column):
+        item = self.tableStops.item(row, column)
+        return item.text().strip() if item is not None else ""
+
+    # Checked state of one pattern cell
+    def cellFlag(self, row, patternKey):
+        item = self.patternItem(row, patternKey)
+        return item is not None and item.checkState() == Qt.CheckState.Checked
+
+    # Manual override flag of an Sp or Ex cell
+    def cellIsManual(self, row, patternKey):
+        item = self.patternItem(row, patternKey)
+        return bool(item.data(MANUAL_FLAG_ROLE)) if item is not None else False
+
+    # Current default dwell time, falling back to the engine default when the field is unreadable
+    def defaultDwell(self):
+        dwellS = stops_model.parseNumber(self.inputDwellTime.text())
+        return stops_model.DEFAULT_DWELL_TIME_S if dwellS is None else dwellS
+
+    # Every complete row of the table as a stop record, unreadable rows are skipped
+    def readRecords(self):
+        records = []
+        for row in range(self.tableStops.rowCount()):
+            stationingKm = stops_model.parseNumber(self.cellText(row, STOPS_COL_KM))
+            if stationingKm is None:
+                continue
+            dwellS = stops_model.parseNumber(self.cellText(row, STOPS_COL_DWELL))
+            nameItem = self.tableStops.item(row, STOPS_COL_NAME)
+            records.append(stops_model.buildStopRecord(
+                stopName=self.cellText(row, STOPS_COL_NAME),
+                stationingKm=stationingKm,
+                dwellTimeS=self.defaultDwell() if dwellS is None else dwellS,
+                municipalityName=self.cellText(row, STOPS_COL_MUNICIPALITY),
+                population=stops_model.parseInteger(self.cellText(row, STOPS_COL_POPULATION)),
+                stopInOs=self.cellFlag(row, "Os"),
+                stopInSp=self.cellFlag(row, "Sp"),
+                stopInEx=self.cellFlag(row, "Ex"),
+                stopInSpIsManual=self.cellIsManual(row, "Sp"),
+                stopInExIsManual=self.cellIsManual(row, "Ex"),
+                stopId=nameItem.data(STOP_ID_ROLE) if nameItem is not None else ""))
+        return stops_model.assignStopIds(records)
+
+    # Rewrite the automatic columns: Ex always follows the endpoints, Sp follows the population rule
+    def applyAutomaticPatterns(self):
+        records = self.readRecords()
+        endpoints = stops_model.endpointIndices(records)
+        isSpAuto = self.checkSpThresholdAuto.isChecked()
+        threshold = self.spinSpThreshold.value()
+        recordIndex = 0
+        self.isPopulating = True
+        for row in range(self.tableStops.rowCount()):
+            if stops_model.parseNumber(self.cellText(row, STOPS_COL_KM)) is None:
+                continue
+            record = records[recordIndex]
+            isEndpoint = recordIndex in endpoints
+            if not record["stopInExIsManual"]:
+                self.patternItem(row, "Ex").setCheckState(
+                    Qt.CheckState.Checked if isEndpoint else Qt.CheckState.Unchecked)
+            if isSpAuto and not record["stopInSpIsManual"]:
+                flag = stops_model.automaticSpFlag(record, isEndpoint, threshold)
+                self.patternItem(row, "Sp").setCheckState(
+                    Qt.CheckState.Checked if flag else Qt.CheckState.Unchecked)
+            recordIndex += 1
+        self.isPopulating = False
+
+    # Counters of the three patterns next to the table
+    def updateCounters(self):
+        counts = stops_model.patternStopCounts(self.readRecords())
+        self.labelCounters.setText(" · ".join(f"{patternKey} {counts[patternKey]}"
+                                                  for patternKey in stops_model.PATTERN_KEYS))
+
+    # A cell changed: a manual Sp or Ex tick sets the override, a population or km edit re-evaluates the rules
+    def onItemChanged(self, item):
+        if self.isPopulating:
+            return
+        manualColumns = (STOPS_COL_FIRST_PATTERN + stops_model.PATTERN_KEYS.index("Sp"),
+                         STOPS_COL_FIRST_PATTERN + stops_model.PATTERN_KEYS.index("Ex"))
+        if item.column() in manualColumns:
+            # Setting the data re-emits itemChanged, so the guard keeps one click to one pass
+            self.isPopulating = True
+            item.setData(MANUAL_FLAG_ROLE, True)
+            self.styleManualCell(item, True)
+            self.isPopulating = False
+        elif item.column() in (STOPS_COL_KM, STOPS_COL_POPULATION):
+            self.applyAutomaticPatterns()
+        self.updateCounters()
+
+    # The threshold changed, rows without a manual override follow it live
+    def onSpRuleChanged(self, value=None):
+        self.applyAutomaticPatterns()
+        self.updateCounters()
+
+    # The automatic rule was switched on or off
+    def onSpAutoToggled(self, isChecked):
+        self.spinSpThreshold.setEnabled(isChecked)
+        self.btnResetOverrides.setEnabled(isChecked)
+        self.onSpRuleChanged()
+
+    # Clear every manual Sp and Ex tick and apply the automatic rules again
+    def onResetOverrides(self):
+        records = stops_model.resetSpOverrides(self.readRecords(), self.spinSpThreshold.value())
+        self.populateRecords(records)
+        self.updateCounters()
+
+    def addStopRow(self):
+        row = self.tableStops.rowCount()
+        newRecord = stops_model.buildStopRecord(dwellTimeS=self.defaultDwell())
+        newRecord["stopId"] = stops_model.nextStopId(self.readRecords())
+        self.isPopulating = True
+        self.tableStops.insertRow(row)
+        self.writeRow(row, newRecord)
+        self.tableStops.item(row, STOPS_COL_KM).setText("")
+        self.isPopulating = False
+        self.updateCounters()
+
+    def removeStopRow(self):
+        currentRow = self.tableStops.currentRow()
+        if currentRow >= 0:
+            self.tableStops.removeRow(currentRow)
+            self.applyAutomaticPatterns()
+            self.updateCounters()
+
+    def importCSV(self):
+        filepath, _ = QFileDialog.getOpenFileName(self, self.lan["importCSV"], "",
+                                                  self.lan.get("csvFileFilter", "CSV Files (*.csv)"))
+        if not filepath: return
+        fileContent = readfile.ReadFile().Read(filepath)
+        if not isinstance(fileContent, str) or fileContent.startswith("Error"):
+            QMessageBox.warning(self, self.lan.get("error", "Error"), str(fileContent))
+            return
+        try:
+            parsed = stops_model.parseStopsCsv(fileContent, self.defaultDwell(), self.spinSpThreshold.value())
+        except Exception as e:
+            QMessageBox.critical(self, self.lan.get("error", "Error"), str(e))
+            return
+        if not parsed["records"]:
+            QMessageBox.warning(self, self.lan.get("error", "Error"),
+                                self.lan.get("batchStopsFileEmpty", "no usable stop rows"))
+            return
+        # Rows that match a stop already in the table keep its identifier
+        stops_model.carryOverStopIds(parsed["records"], self.readRecords())
+        self.populateRecords(parsed["records"])
+        self.applyAutomaticPatterns()
+        self.updateCounters()
+
+    def exportCSV(self):
+        filepath, _ = QFileDialog.getSaveFileName(self, self.lan["exportCSV"], "",
+                                                  self.lan.get("csvFileFilter", "CSV Files (*.csv)"))
+        if not filepath: return
+        try:
+            with open(filepath, "w", newline="", encoding="utf-8") as file:
+                file.write(stops_model.serializeStopsCsv(self.readRecords()))
+        except Exception as e:
+            QMessageBox.critical(self, self.lan.get("error", "Error"), str(e))
+
+    # Names of the patterns that hold fewer than two stops, which cannot form a journey
+    def underfilledPatterns(self):
+        records = self.readRecords()
+        if not records:
+            return []
+        counts = stops_model.patternStopCounts(records)
+        return [patternKey for patternKey in stops_model.PATTERN_KEYS if counts[patternKey] < 2]
+
+    # Confirm before accepting a pattern that has fewer than two stops
+    def onAccept(self):
+        underfilled = self.underfilledPatterns()
+        if underfilled:
+            answer = QMessageBox.question(
+                self, self.lan.get("stopsSettings", "Stops Settings"),
+                self.lan.get("stopsPatternTooFew", "These patterns have fewer than 2 stops:")
+                + " " + ", ".join(underfilled) + ". "
+                + self.lan.get("stopsPatternTooFewContinue", "Save anyway?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.accept()
+
+    def getSettings(self):
+        settingsData = {
+            "stopRecords": self.readRecords(),
+            "activeStopPattern": self.comboActivePattern.currentData(),
+            "spPopulationThreshold": self.spinSpThreshold.value(),
+            "isSpThresholdAuto": self.checkSpThresholdAuto.isChecked(),
+        }
+        dwellS = stops_model.parseNumber(self.inputDwellTime.text())
+        if dwellS is not None:
+            settingsData["defaultDwellTime"] = dwellS
+        stops_model.syncTrainStops(settingsData)
+        return settingsData
+
+
+# Dialog for the recovery margins of the three stopping patterns and the rounding of the scheduled time
+class ScheduleSettingsDialog(QDialog):
+    def __init__(self, settingsData, lan, parent=None):
+        super().__init__(parent)
+        self.lan = lan
+        self.setWindowTitle(lan.get("scheduleSettingsTitle", "Timetable margins"))
+        self.setMinimumWidth(520)
+
+        scheduleSettings = schedule_rules.normalizeScheduleSettings(
+            (settingsData or {}).get("scheduleSettings"))
+
+        layout = QVBoxLayout(self)
+        hintLabel = QLabel(lan.get(
+            "scheduleSettingsHint",
+            "The percentage applies to the running time, the other margins to the whole journey. "
+            "The result is rounded once and split over the legs."))
+        hintLabel.setWordWrap(True)
+        layout.addWidget(hintLabel)
+
+        gridLayout = QGridLayout()
+        gridLayout.addWidget(QLabel(lan.get("schedulePattern", "Pattern")), 0, 0)
+        gridLayout.addWidget(QLabel(lan.get("schedulePercent", "Margin [%]")), 0, 1)
+        gridLayout.addWidget(QLabel(lan.get("scheduleMinutesPer100Km", "Margin [min/100 km]")), 0, 2)
+        gridLayout.addWidget(QLabel(lan.get("scheduleFixedMinutes", "Fixed margin [min]")), 0, 3)
+
+        self.marginSpins = {}
+        for row, patternKey in enumerate(stops_model.PATTERN_KEYS, start=1):
+            gridLayout.addWidget(QLabel(self.lan.get(f"stopPattern{patternKey}", patternKey)), row, 0)
+            margin = scheduleSettings["recoveryMargins"][patternKey]
+            for column, fieldKey in enumerate(("percent", "minutesPer100Km", "fixedMinutes"), start=1):
+                spin = QDoubleSpinBox()
+                spin.setRange(0.0, 1000.0)
+                spin.setDecimals(2)
+                spin.setSingleStep(0.5)
+                spin.setValue(margin[fieldKey])
+                gridLayout.addWidget(spin, row, column)
+                self.marginSpins[(patternKey, fieldKey)] = spin
+        layout.addLayout(gridLayout)
+
+        formLayout = QFormLayout()
+        self.spinRoundingStep = QDoubleSpinBox()
+        self.spinRoundingStep.setRange(0.05, 60.0)
+        self.spinRoundingStep.setDecimals(2)
+        self.spinRoundingStep.setSingleStep(0.5)
+        self.spinRoundingStep.setValue(scheduleSettings["roundingStepMin"])
+        formLayout.addRow(QLabel(lan.get("scheduleRoundingStep", "Rounding step [min]:")), self.spinRoundingStep)
+
+        self.comboRoundingMode = QComboBox()
+        modeCaptions = {
+            "nearest": self.lan.get("scheduleRoundNearest", "To the nearest step"),
+            "up": self.lan.get("scheduleRoundUp", "Up"),
+            "down": self.lan.get("scheduleRoundDown", "Down"),
+        }
+        for modeKey in schedule_rules.ROUNDING_MODES:
+            self.comboRoundingMode.addItem(modeCaptions[modeKey], modeKey)
+        self.comboRoundingMode.setCurrentIndex(
+            max(0, self.comboRoundingMode.findData(scheduleSettings["roundingMode"])))
+        formLayout.addRow(QLabel(lan.get("scheduleRoundingMode", "Rounding:")), self.comboRoundingMode)
+        layout.addLayout(formLayout)
 
         self.buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttonBox.accepted.connect(self.accept)
         self.buttonBox.rejected.connect(self.reject)
         layout.addWidget(self.buttonBox)
 
-    def addStopRow(self):
-        row = self.tableStops.rowCount()
-        self.tableStops.insertRow(row)
-        itemStation = QTableWidgetItem("")
-        defaultDwell = self.inputDwellTime.text()
-        itemDwell = QTableWidgetItem(defaultDwell)
-        itemName = QTableWidgetItem("")
-        self.tableStops.setItem(row, 0, itemStation)
-        self.tableStops.setItem(row, 1, itemDwell)
-        self.tableStops.setItem(row, 2, itemName)
-
-    def removeStopRow(self):
-        currentRow = self.tableStops.currentRow()
-        if currentRow >= 0:
-            self.tableStops.removeRow(currentRow)
-
-    def populateTable(self, tableWidget, data):
-        tableWidget.setRowCount(len(data))
-        for row, rowData in enumerate(data):
-            for col, value in enumerate(rowData):
-                item = QTableWidgetItem(str(value))
-                tableWidget.setItem(row, col, item)
-
-    def importCSV(self, table):
-        filepath, _ = QFileDialog.getOpenFileName(self, "Open File", "", "CSV Files (*.csv)")
-        if not filepath: return
-        fileContent = readfile.ReadFile().Read(filepath)
-        if fileContent.startswith("Error"):
-            err = QMessageBox(); err.setWindowTitle("Error"); err.setIcon(QMessageBox.Icon.Warning); err.exec(); return
-        try:
-            reader = csv.reader(io.StringIO(fileContent), delimiter=',')
-            next(reader, None)
-            dataList = list(reader)
-            if table == "tableStops": self.populateTable(self.tableStops, dataList)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
-            
-    def exportCSV(self, table):
-        filepath, _ = QFileDialog.getSaveFileName(self, "Save File", "", "CSV Files (*.csv)")
-        if not filepath: return
-        try:
-            if table == "tableStops":
-                with open(filepath, "w", newline="") as file:
-                    writer = csv.writer(file)
-                    writer.writerow(["Station", "Dwell Time", "Name"])
-                    for row in range(self.tableStops.rowCount()):
-                        writer.writerow([self.tableStops.item(row, col).text() for col in range(self.tableStops.columnCount())])
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
-            
     def getSettings(self):
-        settingsData = {"trainStops": []}
-        try: settingsData["defaultDwellTime"] = float(self.inputDwellTime.text())
-        except ValueError: pass
-        for row in range(self.tableStops.rowCount()):
-            try: 
-                station = float(self.tableStops.item(row, 0).text())
-                dwell = float(self.tableStops.item(row, 1).text())
-                nameItem = self.tableStops.item(row, 2)
-                name = nameItem.text() if nameItem else ""
-                settingsData["trainStops"].append([station, dwell, name])
-            except (ValueError, AttributeError): 
-                continue
-        return settingsData
+        return {"scheduleSettings": schedule_rules.normalizeScheduleSettings({
+            "recoveryMargins": {
+                patternKey: {fieldKey: self.marginSpins[(patternKey, fieldKey)].value()
+                             for fieldKey in ("percent", "minutesPer100Km", "fixedMinutes")}
+                for patternKey in stops_model.PATTERN_KEYS},
+            "roundingStepMin": self.spinRoundingStep.value(),
+            "roundingMode": self.comboRoundingMode.currentData(),
+        })}
+
 
 class SpeedSettingsDialog(QDialog):
     def __init__(self, settingsData, lan, parent=None):

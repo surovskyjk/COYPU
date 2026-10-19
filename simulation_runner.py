@@ -18,8 +18,21 @@ PROFILE_RESULT_KEYS = vehicle_engine.KINEMATICS_RESULT_KEYS + SPEED_LIMIT_RESULT
 # Warning recorded against a vehicle the active tier exceeds its certified cant deficiency
 WARNING_NOT_CERTIFIED = "profileNotCertified"
 
-# Project level travel direction, it describes the run rather than any one vehicle
+# Project level direction being viewed, the engine still reads it from every vehicle
 RUN_REVERSED_KEY = "runReversed"
+
+# Both travel directions every tier is evaluated for, forward means rising chainage
+DIRECTION_KEYS = ("forward", "reverse")
+
+
+# Direction key of a reversed flag
+def directionKeyFor(isReversed):
+    return "reverse" if isReversed else "forward"
+
+
+# Reversed flag of a direction key
+def isDirectionReversed(directionKey):
+    return directionKey == "reverse"
 
 
 # True when the project drives against the stationing, so the run starts at the highest chainage
@@ -78,9 +91,11 @@ def evaluableProfileKeys(dataStorage, vehicles):
                     for vehicleSettings in vehicles)]
 
 
-# One tier's run over every vehicle, on a fresh copy so the caller's own speedLimitPlot is never touched
-def runProfileEvaluation(baseStorage, profileKey):
+# One tier's run in one direction on a fresh copy, a None direction keeps the one the base storage carries
+def runProfileEvaluation(baseStorage, profileKey, isReversed=None):
     profileStorage = copy.deepcopy(baseStorage)
+    if isReversed is not None:
+        applyRunDirection(profileStorage.setdefault("settingsData", {}), isReversed)
     for vehicleSettings in profileStorage.get("settingsData", {}).get("vehicles", []):
         # A vehicle pinned to manual or unlimited limits keeps its own profile across every tier
         if profile_state.isVehicleOverridden(vehicleSettings):
@@ -110,23 +125,36 @@ def collectProfileResults(profileStorage, profileKey, vehicles):
     return resultsByVehicle
 
 
-# Every requested tier evaluated in turn, returning the cache the main window projects from
+# Every requested tier evaluated in both directions, returning the cache the main window projects from
 def runMultiProfilePipeline(baseStorage, profileKeys, progressCallback=None, cancelCallback=None):
     vehicles = profile_state.vehicleSettingsList(baseStorage)
     resultsByProfile = {}
     evaluatedKeys = []
+    totalPasses = len(profileKeys) * len(DIRECTION_KEYS)
+    completedPasses = 0
 
-    for profileIndex, profileKey in enumerate(profileKeys):
+    for profileKey in profileKeys:
+        directionResults = {}
+        for directionKey in DIRECTION_KEYS:
+            if cancelCallback is not None and cancelCallback():
+                break
+            if progressCallback is not None:
+                progressCallback(completedPasses, totalPasses)
+            profileStorage = runProfileEvaluation(baseStorage, profileKey,
+                                                  isDirectionReversed(directionKey))
+            directionResults[directionKey] = collectProfileResults(profileStorage, profileKey,
+                                                                   vehicles)
+            completedPasses += 1
+        if directionResults:
+            resultsByProfile[profileKey] = directionResults
+        # A tier counts as evaluated only once both of its directions are cached
+        if len(directionResults) == len(DIRECTION_KEYS):
+            evaluatedKeys.append(profileKey)
         if cancelCallback is not None and cancelCallback():
             break
-        if progressCallback is not None:
-            progressCallback(profileIndex, len(profileKeys))
-        profileStorage = runProfileEvaluation(baseStorage, profileKey)
-        resultsByProfile[profileKey] = collectProfileResults(profileStorage, profileKey, vehicles)
-        evaluatedKeys.append(profileKey)
 
     if progressCallback is not None:
-        progressCallback(len(evaluatedKeys), len(profileKeys))
+        progressCallback(completedPasses, totalPasses)
 
     return {
         "resultsByProfile": resultsByProfile,
@@ -148,7 +176,7 @@ class SimulationWorker(QObject):
         self.cancelMutex = QMutex()
         self.isCancelRequested = False
 
-    # Asked from the GUI thread, the run stops between tiers because an engine pass cannot be interrupted
+    # Asked from the GUI thread, the run stops between engine passes because a pass cannot be interrupted
     def requestCancel(self):
         with QMutexLocker(self.cancelMutex):
             self.isCancelRequested = True
@@ -210,7 +238,7 @@ class SimulationController(QObject):
 
         self.thread.start()
 
-    # Cooperative cancel, the current tier still finishes because the engine has no interruption point
+    # Cooperative cancel, the current engine pass still finishes because the engine has no interruption point
     def cancelSimulation(self):
         if self.worker is not None:
             self.worker.requestCancel()

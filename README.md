@@ -53,7 +53,12 @@ The result is `dist/COYPU.exe`. The version shown in its file properties, writte
 - Export geometry report (Text, PDF, Markdown or LaTeX) and kinematics results (CSV)
 - Batch processing: merge several LandXML files with rebased chainage, run a matrix of stopping patterns x design approaches x an optional sensitivity sweep as isolated background variants, compare them on a dedicated overlay dashboard, and export every report, protocol and comparison table as one ZIP archive
 - Native `.coypu` project files: one compressed archive holding the project metadata, every merged alignment with its raw imported assets, stops and TTP data, vehicle configurations, the cached GPK and cant deficiency results, and the saved viewport state, so a reopened project restores its plots without recalculating
-- Extended project metadata dialog: title, author, contract number, date, notes, target norm, optional track / definition section and TUDU codes, and the coordinate system descriptor reused by the LandXML export
+- Extended project metadata dialog: title, author, contract number, date, notes, line number, line name and line category, target norm, optional track / definition section and TUDU codes, and the coordinate system descriptor reused by the LandXML export
+- Three stopping patterns per project (Os local, Sp semi-fast, Ex express) with stop metadata (municipality, population), an automatic population rule for Sp, and a CSV import and export
+- Every simulation evaluates both travel directions at once, the ribbon toggle only chooses which direction the plots and statistics show
+- Scenario matrix: raw theoretical travel times over speed profile tier x vehicle x stopping pattern x direction, for the whole line and between stops, in a dock with a CSV export
+- Scheduled travel time: recovery margins per pattern, rounded once and split over the legs between stops
+- The `.coypu` file also carries a self-contained `karto/dataset.json` (centreline, stops, speed profiles, travel times) for downstream cartographic tools
 - Export the designed alignment back to LandXML 1.2 including the application header, the coordinate system, the horizontal geometry, the newly calculated cant D with its design speeds, and a vertical profile whose curve tangents are guaranteed never to overlap
 - Unsaved changes tracker in the window title, a recent projects list, and a background recovery snapshot written every five minutes and offered for restore after a crash
 
@@ -127,19 +132,93 @@ Vehicle parameters can also be imported and exported per vehicle as a single CSV
 identifier in the first column:
 
 - `Meta` - single line key/value metadata: `vehicleName`, `maxSpeedKmh`, `massTonnes`, `lengthM`, `brakeDecelMs2`,
-  `maxTractiveForceKN` (informational only, does not clip the curve). Optional - a file without `Meta` rows still
-  imports using the `Param`/`Res` values below.
+  `maxTractiveForceKN` (informational only, does not clip the curve), `rotMassFactor`, `maxCantDeficiencyMm`.
+  Optional - a file without `Meta` rows still imports using the `Param`/`Res` values below.
 - `Res` - Davis resistance coefficients: name, A, B, C [N/kN]
 - `Trac` - Traction curve segments: name, V_bottom, V_top, b0, b1, b2 (piecewise polynomial F = b0 + b1*v + b2*v^2 [kN], V [km/h])
 - `Param` - Train parameters: name, rotational mass factor, total weight [t], train length [m]
 
 Multiple vehicles can be defined per project (1 to 5); each is simulated independently.
 
+The Vehicle Settings dialog has a **Load baseline trio** button that sets three vehicles from the catalog in one
+click: `DMU BR 650 (CD 840)`, `Generic BEMU` and `Expres (230 km/h)`. A name missing from the catalog is reported
+and the vehicle is left unchanged. Every vehicle also has an optional label for each direction (forward is rising
+chainage); an empty label resolves automatically to "origin stop -> destination stop" of that direction.
+
+### Expres (230 km/h)
+
+`vehicles/emu_expres_230.csv` is a fast long-distance electric unit extrapolated from Generic BEMU at an equal
+power-to-weight ratio of about 15 kW/t. The other parameters are deliberately not scaled in proportion.
+
+| Parameter | Generic BEMU | Expres (230 km/h) |
+|---|---|---|
+| Top speed | 160 km/h | 230 km/h |
+| Mass / length | 113.5 t / 52.9 m | 400 t / 200 m |
+| Rotational mass factor | 1.08 | 1.06 |
+| Starting tractive effort | 112.5 kN | 300 kN (adhesion limited, 0.75 kN/t) |
+| Wheel power | about 1.68 MW | 6.0 MW |
+| End of constant force range | 53.7 km/h | 72 km/h |
+| Davis A / B / C | 1.6616 / 0.00415 / 0.00017 | 1.25 / 0.0055 / 0.000165 |
+| Braking deceleration | 0.45 m/s2 | 0.50 m/s2 |
+| Max cant deficiency | 150 mm | 150 mm (non-tilting, the VK tier stays gated) |
+
+The traction curve is constant force up to 72 km/h and constant power above, as three continuous quadratic bands
+that follow the exact hyperbola within 0.45 %. On level track it reaches 100 km/h in 43 s, 160 km/h in 91 s over
+2.4 km and 200 km/h in 144 s over 5.1 km.
+
 ---
 
-## Train Stops (CSV Import/Export)
+## Train Stops and Stopping Patterns (Os / Sp / Ex)
 
-Scheduled stops can be imported and exported via CSV with columns: station [km], dwell time [s], name.
+Stops are stored as records with a stable `stopId` (`s001`, `s002`, ...) that never changes when a row is edited.
+It is the join key of the exported Karto dataset. Each record holds the stop name, the stationing [km], the dwell
+time [s], the municipality, the population and a membership flag for each of the three stopping patterns:
+
+- **Os** (local) - on by default for every stop
+- **Sp** (semi-fast) - automatic rule: the two line endpoints plus every stop whose population is at or above the
+  threshold (2000 by default). Ticking an Sp box by hand marks that row as a manual override, which the automatic
+  rule then leaves alone. **Reset overrides** clears every manual tick
+- **Ex** (express) - the two line endpoints plus whatever is ticked by hand. Like Sp it has a manual override: a
+  tick you set by hand stays, every other row follows the endpoints, so adding a stop beyond the last one moves
+  the Ex terminus to it
+
+The lowest and the highest stationing are the endpoints and default to on in all three patterns. New rows are in
+Os. Manual Sp and Ex ticks are shown in italics with a tooltip. The Stops Settings
+dialog has the table, the active pattern selector (the pattern the simulation, the map and the statistics use), the
+Sp threshold with its automatic switch, live counters such as "Os 12 - Sp 5 - Ex 2", a CSV import and export, and a
+warning on OK when a pattern has fewer than two stops. The engine, the map and the reports keep reading the active
+pattern as a plain list of stops, so nothing downstream changed. Changing the active pattern re-runs an existing
+simulation. The same pattern can be chosen from the **Stopping pattern** selector next to the direction toggle in
+the Simulation ribbon, which shows the stop count of every pattern and stays in step with the dialog. OK without
+any edit changes nothing and re-runs nothing.
+
+A `stopId` is never reused: a new stop gets the highest number in use plus one, and a CSV imported into the dialog
+keeps the ids of rows that match an existing stop by name and by stationing within 1 m.
+
+### Stops CSV format
+
+Export writes this header, import maps columns by header name, case-insensitively and in any order:
+
+```
+stopName,stationingKm,dwellTimeS,municipalityName,population,stopInOs,stopInSp,stopInEx
+```
+
+- the delimiter (semicolon, tab or comma) is detected from the first lines: the first one that splits all of them
+  into the same number of columns wins and a semicolon is tried before a comma, so decimal commas and commas
+  inside names are safe. Decimal commas are accepted
+- the population accepts thousands separators (`12,500`, `12 500` and `12.500` all read as 12500)
+- the pattern flags accept `1/0`, `true/false`, `yes/no`, `ano/ne` and `x`; a blank flag takes its default
+- a missing column takes its default (dwell time 30 s, no municipality, no population)
+- the legacy header `Station,Dwell Time,Name`, or any header without a stationing column, is read by position as
+  station [km], dwell time [s], name. A numeric first row is read as data
+- a legacy file gives Os all stops and Sp and Ex the two endpoints, so a project migrated from an older version
+  simulates exactly the same stops as before
+- an Sp or Ex value that differs from the automatic rule is read as a manual override
+
+In the Batch dialog every CSV with a named header adds three stopping pattern profiles ("file - Os", "file - Sp",
+"file - Ex", the Sp rule uses the project's population threshold and a pattern needs at least 2 stops), a legacy
+CSV adds one, and **Add project patterns (Os/Sp/Ex)** adds the patterns of the open project, replacing the ones a
+previous click added.
 
 ---
 
@@ -420,6 +499,65 @@ Traction is defined as a piecewise polynomial over speed bands: F_trac = b0 + b1
 
 Train stops are enforced by setting the speed limit to zero at the stop station. A configurable dwell time is added to the travel time.
 
+### Both directions
+
+Simulate always evaluates every speed profile tier in both directions (forward is rising chainage) and caches both.
+The ribbon toggle **Show reverse direction** is a view switch: it reprojects the cached run of the viewed direction
+onto the plots, the statistics and the reports without running the engine again. Only a direction that is not
+cached, for example after reopening a project, triggers one fresh run. The switch also works while a matrix or a
+batch runs; only a direction that is not cached cannot be shown then, and the toggle goes back. The plots and
+statistics always show the direction the toggle states.
+
+---
+
+## Scenario Matrix
+
+**Simulation > Scenario matrix...** evaluates the raw theoretical travel time (T_raw-th) over every combination of
+speed profile tier (TTP, V100, V130, V150, VK; only tiers with data are offered), vehicle (the project's vehicles),
+stopping pattern (Os, Sp, Ex) and both directions, on a background thread with a status bar progress and a cancel
+button. The dialog shows the number of engine passes (patterns x tiers x 2). A matrix run is blocked while a
+simulation or a batch is running.
+
+For every cell the matrix keeps a summary only, never the trajectory: the total run time of the line, the origin
+to destination time, the pure running time, the intermediate dwell time and one row per section between stops. A
+cell has one of these statuses: `ok`, `notCertified` (the vehicle's certified cant deficiency is below the tier),
+`zeroSpeedSection` (the cant design permits no speed somewhere), `noTrackData`, `tooFewStops` or `trainTooLong`
+(the train is longer than the simulated line).
+
+The **Scenario matrix** dock (tabbed with Track Statistics) shows vehicle and pattern down and the tiers across,
+with a Raw / Scheduled switch, a direction selector labelled with the vehicle's direction labels, a leg table for
+the selected cell (with a total row) and a CSV export. Before a first run the dock shows a message with a button
+that starts one. Results are stored in the project and carry a SHA-1 signature of what they depend on: the stops
+of the stored patterns (id, stationing, dwell time and membership, never the municipality or population), the
+physics of the stored vehicles, the speed profiles of the stored tiers and every alignment array the engine reads.
+When any of them changes the dock shows an out-of-date badge with a **Re-run** button that reopens the dialog with
+the last selection. The numbers are kept and never silently dropped.
+
+---
+
+## Scheduled Travel Time
+
+**Timetable margins...** (Simulation and Settings ribbons) sets, for each pattern, a recovery margin of a
+percentage, minutes per 100 km and a fixed number of minutes, plus a rounding step (0.5 min by default) and mode
+(nearest, up, down). For one origin to destination journey with legs of raw running time r_i, R = sum of r_i,
+intermediate dwell time D and length L:
+
+1. S = R x (1 + p/100) + 60 x (m x L/100 + F) + D. The percentage applies to the running time only, the dwell passes
+   through unchanged
+2. S is rounded once to the step. "Nearest" rounds half up
+3. The remaining running time A = S_rounded - D is split over the legs in proportion to r_i (equally when R is
+   zero), in whole steps. Every leg first gets at least ceil(r_i / step) steps, so no leg is scheduled shorter
+   than its raw running time; the rest is distributed by the largest remainder method, and a leg above its
+   minimum gives a step back when the floors overshoot. A dwell that is not a multiple of the step leaves a
+   fraction below one step, which goes to the leg with the largest remainder
+4. When the minimums alone need more steps than A holds (for example when the margin is zero and the rounding
+   goes down), the legs fall back to the exact proportional split A x r_i / R. They still add up exactly, the cell
+   is flagged `isLegRoundingRelaxed` and the dock shows a note
+
+The legs and the dwells therefore always add up to the rounded total exactly. Scheduled values are computed on
+demand from the cached raw values, so changing a margin needs no new simulation. Track Statistics shows a
+"Scheduled O->D" card for the active pattern and vehicle.
+
 ---
 
 ## Batch Processing and Variant Comparison
@@ -435,6 +573,62 @@ The Batch page runs many track variants unattended and compares them side by sid
 
 ---
 
+## Project File Format and the Karto Dataset
+
+A `.coypu` file is a ZIP archive: `project.json`, the raw imported files under `assets/` and `karto/dataset.json`.
+The format version is 2. Files of version 1 (written by 0.3.0) still open: their stop list becomes stop records
+(Os takes every stop, Sp and Ex the endpoints), the metadata gains the line fields and every setting added later is
+filled from the defaults. Files written by this version are always version 2, and older releases refuse them as
+newer than supported.
+
+Version 2 adds to `project.json`: `projectMetadata.lineNumber`, `lineName` and `lineCategory` (empty, `regional` or
+`national`), `stopsData.stopRecords`, `activeStopPattern`, `spPopulationThreshold` and `isSpThresholdAuto`,
+`scheduleSettings`, `directionLabels` of every vehicle and `baselineVehicleNames` inside the saved settings, the
+`scenarioMatrix` result inside the calculation cache and a `kartoDataset` pointer.
+
+`karto/dataset.json` is compact JSON rebuilt on every save, recovery snapshots included. COYPU never reads it back.
+Rounding: latitude and longitude 7 decimals, easting and northing 3, kilometres 5, seconds 0.1.
+
+```
+{ schemaVersion: 1, generatedAt, application: {name, version},
+  units: {chainage: "km", length: "m", time: "s", speed: "km/h"},
+  line: {lineNumber, lineName, lineCategory, projectTitle, lengthKm,
+         chainageStartKm, chainageEndKm, isOptimizedAlignment},
+  crs: {source: "EPSG:5514", sourceAxisOrder: "easting,northing", sourceName, geographic: "EPSG:4326"},
+  centerline: {sampleSpacingM: 10, stationingKm: [...], lat: [...], lon: [...], easting: [...], northing: [...]},
+  chainageMap: {baselineKm: [...], activeKm: [...]} | null,
+  keyPoints: [{stationingKm, type, lat, lon, easting, northing}],
+  stops: [{stopId, stopName, stationingKm, activeStationingKm, dwellTimeS, municipalityName, population,
+           stopInOs, stopInSp, stopInEx, stopInSpIsManual, stopInExIsManual, lat, lon, easting, northing}],
+  stopPatterns: {Os: {stopIds: [...]}, Sp: {...}, Ex: {...}},
+  speedProfiles: {TTP | 100 | 130 | 150 | K: {stationingKm: [...], speedKmh: [...]}},
+  vehicles: [{vehicleIndex, vehicleName, trainMaxSpeedKmh, massTonnes, lengthM, directionLabels}],
+  travelTimes: {status: "ok" | "stale" | "missing", evaluatedAt, scheduleSettings,
+                designContext: {designApproach, maxDmm, calculationMode, isOptimizedAlignment},
+                scenarios: [{scenarioId, profileKey, vehicleIndex, vehicleName, patternKey, direction,
+                             isReversed, directionLabel, originStopId, destinationStopId, status,
+                             rawTotalRunS, rawOriginDestS, rawRunningS, dwellTotalS, scheduledOriginDestS,
+                             isLegRoundingRelaxed,
+                             sections: [{fromStopId, toStopId, fromStationingKm, toStationingKm, lengthKm,
+                                         rawRunS, scheduledRunS, dwellAtToS}]}]}}
+```
+
+- The centreline is the active alignment resampled every 10 m by stationing. Easting and northing come from the
+  inverse transform of the WGS84 samples into the project's coordinate system (EPSG:5514 uses its standard axes, so
+  the values are negative)
+- Stops and key points (element boundaries ZU, ZP, KP, ZO, KO, KU) are interpolated along the centreline at their
+  stationing on the active alignment. The key points are read from the active element arrays (the element order of
+  `geometryType` with the stations of `stationHorizontal`), so they follow an optimized alignment. After an
+  optimization `chainageMap` relates the entered stationing to the active one
+- Chainage: `stops.stationingKm` is the chainage as entered, `stops.activeStationingKm` is the same stop projected
+  onto the active alignment, and every other chainage of the file (`centerline`, `keyPoints`, `speedProfiles`,
+  `sections.fromStationingKm` and `toStationingKm`) is on the active alignment
+- A scenario id reads `tier|vehicle|pattern|direction`, for example `150|v0|Os|forward`. `forward` is rising
+  chainage. `status` of the travel times is `stale` when stops, vehicles, speed profiles or the alignment changed
+  since the matrix run, and `missing` when no matrix was run
+
+---
+
 ## Project Structure
 
 - `main.py` - application entry point
@@ -446,7 +640,12 @@ The Batch page runs many track variants unattended and compares them side by sid
 - `optimization_runner.py` - isolated background execution of the alignment optimization
 - `slew_report.py` - lateral slew summary table and its window
 - `vehicle_engine.py` - train kinematics simulation
-- `simulation_runner.py` - isolated multi profile kinematics evaluation on a background thread
+- `simulation_runner.py` - isolated multi profile kinematics evaluation, both directions, on a background thread
+- `stops_model.py` - stop records, Os / Sp / Ex patterns, stops CSV parsing and legacy migration
+- `schedule_rules.py` - recovery margins, one time rounding and the largest remainder split over the legs
+- `scenario_matrix.py` - scenario matrix pipeline, input signature and its background thread controller
+- `scenario_matrix_dock.py` - scenario matrix dock widget and the dialog choosing what a run covers
+- `karto_export.py` - builder of `karto/dataset.json` and the shared centreline interpolation
 - `profile_state.py` - the active design speed profile shared by every profile selector
 - `readfile.py` - LandXML and XML TTP parsers, coordinate transformations
 - `map_viewer.py` - interactive Folium map widget with floating map controls

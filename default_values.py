@@ -52,6 +52,25 @@ defVal = {
               ],
 "trainBrakeDecel": 0.45,
 "trainParam": [["Generic BEMU", 1.08, 113.5, 52.9]],
-"maxCantDeficiencyMm": 150.0
-        
+"maxCantDeficiencyMm": 150.0,
+# Catalog names the Load baseline trio button applies, in vehicle order
+"baselineVehicleNames": ["DMU BR 650 (CD 840)", "Generic BEMU", "Expres (230 km/h)"],
+# Stop records carry the Os / Sp / Ex membership, trainStops is the active pattern derived from them
+"stopRecords": [],
+# Present from the start, so an unchanged Stops dialog OK on a fresh project is not read as an edit
+"defaultDwellTime": 30.0,
+"activeStopPattern": "Os",
+"spPopulationThreshold": 2000,
+"isSpThresholdAuto": True,
+# Recovery margins per stopping pattern plus the one time rounding of the scheduled travel time
+"scheduleSettings": {
+    "recoveryMargins": {
+        "Os": {"percent": 5.0, "minutesPer100Km": 0.0, "fixedMinutes": 0.0},
+        "Sp": {"percent": 5.0, "minutesPer100Km": 0.0, "fixedMinutes": 0.0},
+        "Ex": {"percent": 5.0, "minutesPer100Km": 0.0, "fixedMinutes": 0.0}
+        },
+    "roundingStepMin": 0.5,
+    "roundingMode": "nearest"
+    }
+
 }
