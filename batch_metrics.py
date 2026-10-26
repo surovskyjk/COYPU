@@ -85,6 +85,21 @@ def stopTiming(stationsM, timesS, stationKm, dwellSeconds):
     return max(0.0, depTime - dwellSeconds), depTime
 
 
+# Highest simulated speed in km/h between the samples nearest to two stops, None when either stop lies outside the run
+def legMaxSpeedKmh(stationsM, speedsMs, fromStationKm, toStationKm, toleranceM=STOP_MATCH_TOLERANCE_M):
+    if not (hasData(stationsM) and hasData(speedsMs)) or len(speedsMs) != len(stationsM):
+        return None
+    stationsM = np.asarray(stationsM, dtype=float)
+    indices = []
+    for stationKm in (fromStationKm, toStationKm):
+        index = int(np.argmin(np.abs(stationsM - stationKm * 1000.0)))
+        if abs(float(stationsM[index]) - stationKm * 1000.0) > toleranceM:
+            return None
+        indices.append(index)
+    first, last = min(indices), max(indices)
+    return float(np.max(np.asarray(speedsMs[first:last + 1], dtype=float)) * 3.6)
+
+
 # Origin to destination time and one row per leg for stops in run order, extra stop fields pass through
 def computeTravelTimeSectionDetails(stationsM, timesS, orderedStops):
     originDestTime = None

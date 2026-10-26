@@ -220,6 +220,7 @@ def summarizeCell(profileStorage, localIndex, vehicleSettings, profileKey, patte
 
     stationsM = profileStorage.get(f"kinematicsStationM_{localIndex}")
     timesS = profileStorage.get(f"kinematicsTimeS_{localIndex}")
+    speedsMs = profileStorage.get(f"kinematicsSpeedM_{localIndex}")
     if warningKey == ENGINE_WARNING_NO_TRACK_DATA or not (batch_metrics.hasData(stationsM)
                                                           and batch_metrics.hasData(timesS)):
         cell["status"] = STATUS_NO_TRACK_DATA
@@ -246,6 +247,8 @@ def summarizeCell(profileStorage, localIndex, vehicleSettings, profileKey, patte
             "lengthKm": leg["lengthKm"],
             "rawRunS": leg["runTimeS"],
             "dwellAtToS": leg["dwellAtToS"],
+            "maxSpeedKmh": batch_metrics.legMaxSpeedKmh(stationsM, speedsMs, leg["fromStationKm"],
+                                                        leg["toStationKm"]),
         })
 
     cell["originStopId"] = reachableStops[0][3]
