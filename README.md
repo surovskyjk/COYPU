@@ -519,14 +519,16 @@ button. The dialog shows the number of engine passes (patterns x tiers x 2). A m
 simulation or a batch is running.
 
 For every cell the matrix keeps a summary only, never the trajectory: the total run time of the line, the origin
-to destination time, the pure running time, the intermediate dwell time and one row per section between stops. A
+to destination time, the pure running time, the intermediate dwell time and one row per section between stops,
+with the highest simulated speed of that section. A
 cell has one of these statuses: `ok`, `notCertified` (the vehicle's certified cant deficiency is below the tier),
 `zeroSpeedSection` (the cant design permits no speed somewhere), `noTrackData`, `tooFewStops` or `trainTooLong`
 (the train is longer than the simulated line).
 
 The **Scenario matrix** dock (tabbed with Track Statistics) shows vehicle and pattern down and the tiers across,
 with a Raw / Scheduled switch, a direction selector labelled with the vehicle's direction labels, a leg table for
-the selected cell (with a total row) and a CSV export. Before a first run the dock shows a message with a button
+the selected cell (raw and scheduled running time, raw and scheduled dwell, highest speed, with a total row) and a
+CSV export. Before a first run the dock shows a message with a button
 that starts one. Results are stored in the project and carry a SHA-1 signature of what they depend on: the stops
 of the stored patterns (id, stationing, dwell time and membership, never the municipality or population), the
 physics of the stored vehicles, the speed profiles of the stored tiers and every alignment array the engine reads.
@@ -544,19 +546,22 @@ intermediate dwell time D and length L:
 
 1. S = R x (1 + p/100) + 60 x (m x L/100 + F) + D. The percentage applies to the running time only, the dwell passes
    through unchanged
-2. S is rounded once to the step. "Nearest" rounds half up
-3. The remaining running time A = S_rounded - D is split over the legs in proportion to r_i (equally when R is
-   zero), in whole steps. Every leg first gets at least ceil(r_i / step) steps, so no leg is scheduled shorter
-   than its raw running time; the rest is distributed by the largest remainder method, and a leg above its
-   minimum gives a step back when the floors overshoot. A dwell that is not a multiple of the step leaves a
-   fraction below one step, which goes to the leg with the largest remainder
-4. When the minimums alone need more steps than A holds (for example when the margin is zero and the rounding
-   goes down), the legs fall back to the exact proportional split A x r_i / R. They still add up exactly, the cell
-   is flagged `isLegRoundingRelaxed` and the dock shows a note
+2. S is rounded once to the step. "Nearest" rounds half up. Only the whole journey is rounded, because rounding
+   every leg on its own would add up on lines with many stops
+3. Every leg gets ceil(r_i / step) steps, so no leg is scheduled shorter than its raw running time
+4. Every intermediate dwell gets whole steps. A dwell that is not a whole step (for example 15 s on a 30 s grid) is
+   rounded down when the next leg, rounded up, still keeps every stretch from a departure to a later arrival at or
+   above its raw time (raw legs plus raw dwells between them); otherwise it is rounded up. A dwell that is a whole
+   step stays as it is. The short stops thereby take back the time the rounded up legs add
+5. When these legs and dwells fit into S_rounded, the journey keeps S_rounded and the spare steps go to the legs in
+   proportion to r_i (equally when R is zero) by the largest remainder method. Otherwise the journey is raised to
+   the sum of the rounded legs and dwells, the fewest steps that keep every leg and every stretch at or above its raw
+   time; the cell is then flagged `isLegRoundingRelaxed` and the dock shows a note
 
-The legs and the dwells therefore always add up to the rounded total exactly. Scheduled values are computed on
-demand from the cached raw values, so changing a margin needs no new simulation. Track Statistics shows a
-"Scheduled O->D" card for the active pattern and vehicle.
+Every leg, every dwell and the journey are therefore whole steps, the legs and dwells add up to the journey
+exactly, and the journey is never shorter than S_rounded. Scheduled values are computed on demand from the cached
+raw values, so changing a margin needs no new simulation. Track Statistics shows a "Scheduled O->D" card for the
+active pattern and vehicle.
 
 ---
 
@@ -587,7 +592,7 @@ Version 2 adds to `project.json`: `projectMetadata.lineNumber`, `lineName` and `
 `scenarioMatrix` result inside the calculation cache and a `kartoDataset` pointer.
 
 `karto/dataset.json` is compact JSON rebuilt on every save, recovery snapshots included. COYPU never reads it back.
-Rounding: latitude and longitude 7 decimals, easting and northing 3, kilometres 5, seconds 0.1.
+Rounding: latitude and longitude 7 decimals, easting and northing 3, kilometres 5, seconds 0.1, speeds 0.1 km/h.
 
 ```
 { schemaVersion: 1, generatedAt, application: {name, version},
@@ -610,7 +615,8 @@ Rounding: latitude and longitude 7 decimals, easting and northing 3, kilometres 
                              rawTotalRunS, rawOriginDestS, rawRunningS, dwellTotalS, scheduledOriginDestS,
                              isLegRoundingRelaxed,
                              sections: [{fromStopId, toStopId, fromStationingKm, toStationingKm, lengthKm,
-                                         rawRunS, scheduledRunS, dwellAtToS}]}]}}
+                                         rawRunS, scheduledRunS, dwellAtToS, scheduledDwellAtToS,
+                                         maxSpeedKmh}]}]}}
 ```
 
 - The centreline is the active alignment resampled every 10 m by stationing. Easting and northing come from the

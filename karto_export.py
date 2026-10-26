@@ -30,6 +30,7 @@ LAT_LON_DECIMALS = 7
 PROJECTED_DECIMALS = 3
 KM_DECIMALS = 5
 SECONDS_DECIMALS = 1
+SPEED_DECIMALS = 1
 
 # Units block of the dataset
 KARTO_UNITS = {"chainage": "km", "length": "m", "time": "s", "speed": "km/h"}
@@ -293,9 +294,11 @@ def buildScenario(cell, settingsData, recordsById, scheduleSettings):
 
     scheduled = schedule_rules.scheduleCell(cell, scheduleSettings)
     scheduledLegs = scheduled["scheduledLegsS"] if scheduled else [None] * len(cell["sections"])
+    # The destination has no dwell in the journey, so the last leg carries none
+    scheduledDwells = (scheduled["scheduledDwellsS"] + [None]) if scheduled else [None] * len(cell["sections"])
 
     sections = []
-    for section, scheduledRunS in zip(cell["sections"], scheduledLegs):
+    for section, scheduledRunS, scheduledDwellS in zip(cell["sections"], scheduledLegs, scheduledDwells):
         sections.append({
             "fromStopId": section["fromStopId"],
             "toStopId": section["toStopId"],
@@ -305,6 +308,8 @@ def buildScenario(cell, settingsData, recordsById, scheduleSettings):
             "rawRunS": roundOrNone(section["rawRunS"], SECONDS_DECIMALS),
             "scheduledRunS": roundOrNone(scheduledRunS, SECONDS_DECIMALS),
             "dwellAtToS": roundOrNone(section["dwellAtToS"], SECONDS_DECIMALS),
+            "scheduledDwellAtToS": roundOrNone(scheduledDwellS, SECONDS_DECIMALS),
+            "maxSpeedKmh": roundOrNone(section.get("maxSpeedKmh"), SPEED_DECIMALS),
         })
 
     return {

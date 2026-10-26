@@ -76,7 +76,7 @@ def quantizeSeconds(valueS, stepS, roundingMode=DEFAULT_ROUNDING_MODE):
 def apportionSteps(totalSteps, weights, minSteps=None):
     legCount = len(weights)
     minimums = list(minSteps) if minSteps is not None else [0] * legCount
-    # Rounding cannot honour every leg minimum, the caller falls back to the unrounded split
+    # Rounding cannot honour every leg minimum, computeScheduledTimes raises the total so this never happens there
     if sum(minimums) > totalSteps:
         return None, None
 
@@ -99,14 +99,38 @@ def apportionSteps(totalSteps, weights, minSteps=None):
     return steps, ranking
 
 
-# Scheduled origin to destination time and the legs between stops for one cell
+# Smallest whole steps that keep the timetable at or above the raw run: every leg rounded up, every dwell rounded
+# down where the next leg still keeps each stretch from a departure to a later arrival at or above its raw time,
+# otherwise rounded up
+def scheduleDwellSteps(legTimesS, dwellsS, stepS):
+    legSteps = [math.ceil(runTimeS / stepS - EPSILON) for runTimeS in legTimesS]
+    dwellSteps = []
+    # Scheduled minus raw time at the current event, and the largest such slack at any departure so far
+    slackS = 0.0
+    maxDepartureSlackS = 0.0
+    for index, dwellS in enumerate(dwellsS):
+        slackS += legSteps[index] * stepS - legTimesS[index]
+        downSteps = math.floor(dwellS / stepS + EPSILON)
+        nextLegSlackS = legSteps[index + 1] * stepS - legTimesS[index + 1]
+        if slackS - (dwellS - downSteps * stepS) + nextLegSlackS >= maxDepartureSlackS - EPSILON:
+            steps = downSteps
+        else:
+            steps = math.ceil(dwellS / stepS - EPSILON)
+        slackS += steps * stepS - dwellS
+        maxDepartureSlackS = max(maxDepartureSlackS, slackS)
+        dwellSteps.append(steps)
+    return legSteps, dwellSteps
+
+
+# Scheduled origin to destination time, the legs between stops and the intermediate dwells for one cell: the run
+# with its margins rounded once, raised only when that would leave a leg or a stretch of legs below its raw time
 def computeScheduledTimes(legRunTimesS, intermediateDwellS, lengthKm, margin,
                           roundingStepMin=DEFAULT_ROUNDING_STEP_MIN,
-                          roundingMode=DEFAULT_ROUNDING_MODE):
+                          roundingMode=DEFAULT_ROUNDING_MODE, intermediateDwellsS=None):
     legTimes = [max(float(runTimeS), 0.0) for runTimeS in legRunTimesS]
     if not legTimes:
-        return {"scheduledOriginDestS": None, "scheduledLegsS": [], "scheduledRunningS": None,
-                "isLegRoundingRelaxed": False}
+        return {"scheduledOriginDestS": None, "scheduledLegsS": [], "scheduledDwellsS": [],
+                "scheduledRunningS": None, "isLegRoundingRelaxed": False}
 
     runningS = sum(legTimes)
     dwellS = max(float(intermediateDwellS), 0.0)
@@ -120,33 +144,32 @@ def computeScheduledTimes(legRunTimesS, intermediateDwellS, lengthKm, margin,
     roundedS = quantizeSeconds(unroundedS, stepS, roundingMode)
     roundedS = max(roundedS, quantizeSeconds(dwellS, stepS, "up"))
 
-    availableS = roundedS - dwellS
     if runningS > 0.0:
         weights = [runTimeS / runningS for runTimeS in legTimes]
     else:
         weights = [1.0 / len(legTimes)] * len(legTimes)
 
-    totalSteps = max(math.floor(availableS / stepS + EPSILON), 0)
-    # A leg must never be scheduled shorter than the train needs for it
-    minSteps = [math.ceil(runTimeS / stepS - EPSILON) for runTimeS in legTimes]
-    steps, ranking = apportionSteps(totalSteps, weights, minSteps)
-
-    if steps is None:
-        # The proportional split is exact but not on the step grid, and the cell says so
-        scheduledLegs = [availableS * weight for weight in weights]
-        isRelaxed = True
+    # Without the dwell of every stop the whole dwell is taken at the first intermediate stop
+    if intermediateDwellsS is not None:
+        dwellsS = [max(float(value), 0.0) for value in intermediateDwellsS]
     else:
-        scheduledLegs = [count * stepS for count in steps]
-        # A dwell that is not a multiple of the step leaves a fraction below one step for one leg
-        leftoverS = availableS - totalSteps * stepS
-        scheduledLegs[ranking[0]] += max(leftoverS, 0.0)
-        isRelaxed = False
+        dwellsS = ([dwellS] + [0.0] * (len(legTimes) - 2)) if len(legTimes) > 1 else []
+    legSteps, dwellSteps = scheduleDwellSteps(legTimes, dwellsS, stepS)
+    roundedSteps = int(round(roundedS / stepS))
+    minimalSteps = sum(legSteps) + sum(dwellSteps)
+    totalSteps = max(roundedSteps, minimalSteps)
+
+    # Steps the rounded run has beyond the minimum go to the legs by their raw time
+    legTotalSteps = totalSteps - sum(dwellSteps)
+    steps, _ = apportionSteps(legTotalSteps, weights, legSteps)
 
     return {
-        "scheduledOriginDestS": roundedS,
-        "scheduledLegsS": scheduledLegs,
-        "scheduledRunningS": availableS,
-        "isLegRoundingRelaxed": isRelaxed,
+        "scheduledOriginDestS": totalSteps * stepS,
+        "scheduledLegsS": [count * stepS for count in steps],
+        "scheduledDwellsS": [count * stepS for count in dwellSteps],
+        "scheduledRunningS": legTotalSteps * stepS,
+        # The once rounded run was too short to keep every leg at or above its raw time, so it was raised
+        "isLegRoundingRelaxed": minimalSteps > roundedSteps,
     }
 
 
@@ -160,11 +183,11 @@ def scheduleCell(cell, scheduleSettings):
 
     settings = normalizeScheduleSettings(scheduleSettings)
     margin = settings["recoveryMargins"][stops_model.normalizePatternKey(cell.get("patternKey"))]
-    intermediateDwellS = sum(float(section.get("dwellAtToS") or 0.0) for section in sections[:-1])
+    intermediateDwellsS = [float(section.get("dwellAtToS") or 0.0) for section in sections[:-1]]
     lengthKm = sum(float(section.get("lengthKm") or 0.0) for section in sections)
-    return computeScheduledTimes([section["rawRunS"] for section in sections], intermediateDwellS,
+    return computeScheduledTimes([section["rawRunS"] for section in sections], sum(intermediateDwellsS),
                                  lengthKm, margin, settings["roundingStepMin"],
-                                 settings["roundingMode"])
+                                 settings["roundingMode"], intermediateDwellsS)
 
 
 # Independent copy of schedule settings, safe to edit in a dialog
@@ -185,7 +208,8 @@ def scheduleFromStorage(dataStorage, vehicleIndex):
     settings = normalizeScheduleSettings(settingsData.get("scheduleSettings"))
     margin = settings["recoveryMargins"][stops_model.normalizePatternKey(
         settingsData.get("activeStopPattern"))]
+    intermediateDwellsS = [leg["dwellAtToS"] for leg in legs[:-1]]
     return computeScheduledTimes(
-        [leg["runTimeS"] for leg in legs], sum(leg["dwellAtToS"] for leg in legs[:-1]),
+        [leg["runTimeS"] for leg in legs], sum(intermediateDwellsS),
         sum(leg["lengthKm"] for leg in legs), margin, settings["roundingStepMin"],
-        settings["roundingMode"])
+        settings["roundingMode"], intermediateDwellsS)

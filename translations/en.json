@@ -873,6 +873,8 @@
   "matrixColRaw": "Raw [mm:ss]",
   "matrixColScheduled": "Scheduled [mm:ss]",
   "matrixColDwell": "Dwell [s]",
+  "matrixColScheduledDwell": "Scheduled dwell [s]",
+  "matrixColMaxSpeed": "Max speed [km/h]",
   "matrixStatusNotCertified": "not certified",
   "matrixStatusZeroSpeed": "no permitted speed",
   "matrixStatusNoTrackData": "no track data",
@@ -901,7 +903,7 @@
   "matrixRerun": "Re-run",
   "matrixRerunTip": "Open the matrix dialog with the last selection",
   "matrixRunButton": "Run scenario matrix...",
-  "matrixLegRoundingRelaxed": "The legs are not whole steps: rounding could not keep every leg at or above its raw running time.",
+  "matrixLegRoundingRelaxed": "The origin to destination time is longer than the rounded time with margins, so that no leg or stretch of legs is shorter than its raw running time.",
   "matrixRowTotal": "Total",
   "matrixStatusTrainTooLong": "train longer than the line"
 }

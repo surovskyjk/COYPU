@@ -114,7 +114,7 @@ class ScenarioMatrixWidget(QWidget):
         detailLayout.setSpacing(4)
         self.cellInfoLabel = QLabel()
         self.cellInfoLabel.setWordWrap(True)
-        self.legTable = QTableWidget(0, 5)
+        self.legTable = QTableWidget(0, 7)
         self.legTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.legTable.verticalHeader().setVisible(False)
         self.legTable.verticalHeader().setDefaultSectionSize(TABLE_ROW_HEIGHT_PX)
@@ -284,6 +284,8 @@ class ScenarioMatrixWidget(QWidget):
         scheduleSettings = (self.dataStorage.get("settingsData", {}) or {}).get("scheduleSettings")
         scheduled = schedule_rules.scheduleCell(cell, scheduleSettings)
         scheduledLegs = scheduled["scheduledLegsS"] if scheduled else [None] * len(cell["sections"])
+        # The destination has no dwell in the journey, so the last leg carries none
+        scheduledDwells = (scheduled["scheduledDwellsS"] + [None]) if scheduled else [None] * len(cell["sections"])
 
         originRecord = records.get(cell.get("originStopId"))
         destinationRecord = records.get(cell.get("destinationStopId"))
@@ -299,7 +301,8 @@ class ScenarioMatrixWidget(QWidget):
         self.relaxedLabel.setVisible(bool(scheduled and scheduled.get("isLegRoundingRelaxed")))
 
         sections = cell["sections"]
-        for legIndex, (section, scheduledRunS) in enumerate(zip(sections, scheduledLegs)):
+        for legIndex, (section, scheduledRunS, scheduledDwellS) in enumerate(
+                zip(sections, scheduledLegs, scheduledDwells)):
             fromRecord = records.get(section["fromStopId"])
             toRecord = records.get(section["toStopId"])
             legLabel = (f"{stops_model.stopCaption(fromRecord) if fromRecord else section['fromStopId']}"
@@ -317,6 +320,12 @@ class ScenarioMatrixWidget(QWidget):
             # The dwell at the destination is not part of the journey, so it shows no value
             self.legTable.setItem(legRow, 4, self.numberItem(
                 NO_VALUE_TEXT if isLastLeg else f"{section['dwellAtToS']:.0f}"))
+            self.legTable.setItem(legRow, 5, self.numberItem(
+                NO_VALUE_TEXT if scheduledDwellS is None else f"{scheduledDwellS:.0f}"))
+            # A matrix run before the speed was kept has no value to show
+            maxSpeedKmh = section.get("maxSpeedKmh")
+            self.legTable.setItem(legRow, 6, self.numberItem(
+                NO_VALUE_TEXT if maxSpeedKmh is None else f"{maxSpeedKmh:.0f}"))
 
         if sections:
             totalRow = self.legTable.rowCount()
@@ -336,6 +345,12 @@ class ScenarioMatrixWidget(QWidget):
                 batch_metrics.formatDuration(scheduledTotalS, self.noDataText()), True))
             self.legTable.setItem(totalRow, 4, self.numberItem(
                 f"{sum(section['dwellAtToS'] for section in sections[:-1]):.0f}", True))
+            self.legTable.setItem(totalRow, 5, self.numberItem(
+                f"{sum(scheduled['scheduledDwellsS']):.0f}" if scheduled else self.noDataText(), True))
+            # The whole journey's highest speed is the highest of its legs
+            maxSpeeds = [section["maxSpeedKmh"] for section in sections if section.get("maxSpeedKmh") is not None]
+            self.legTable.setItem(totalRow, 6, self.numberItem(
+                f"{max(maxSpeeds):.0f}" if maxSpeeds else NO_VALUE_TEXT, True))
 
     # Write every scenario of the stored matrix, with scheduled values, into one CSV file
     def exportCsv(self):
@@ -389,13 +404,16 @@ class ScenarioMatrixWidget(QWidget):
         self.runButton.setText(self.lan.get("matrixRunButton", "Run scenario matrix..."))
         self.relaxedLabel.setText(self.lan.get(
             "matrixLegRoundingRelaxed",
-            "The legs are not whole steps: rounding could not keep every leg at or above its raw running time."))
+            "The origin to destination time is longer than the rounded time with margins, so that no leg or "
+            "stretch of legs is shorter than its raw running time."))
         self.legTable.setHorizontalHeaderLabels([
             self.lan.get("statsSegmentColumn", "Segment"),
             self.lan.get("matrixColLength", "Length [km]"),
             self.lan.get("matrixColRaw", "Raw [mm:ss]"),
             self.lan.get("matrixColScheduled", "Scheduled [mm:ss]"),
             self.lan.get("matrixColDwell", "Dwell [s]"),
+            self.lan.get("matrixColScheduledDwell", "Scheduled dwell [s]"),
+            self.lan.get("matrixColMaxSpeed", "Max speed [km/h]"),
         ])
         self.setData(self.dataStorage)
 

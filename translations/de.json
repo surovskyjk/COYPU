@@ -873,6 +873,8 @@
   "matrixColRaw": "Roh [mm:ss]",
   "matrixColScheduled": "Fahrplan [mm:ss]",
   "matrixColDwell": "Halt [s]",
+  "matrixColScheduledDwell": "Halt lt. Fahrplan [s]",
+  "matrixColMaxSpeed": "Max. Geschw. [km/h]",
   "matrixStatusNotCertified": "nicht zugelassen",
   "matrixStatusZeroSpeed": "keine zulässige Geschwindigkeit",
   "matrixStatusNoTrackData": "keine Streckendaten",
@@ -901,7 +903,7 @@
   "matrixRerun": "Neu starten",
   "matrixRerunTip": "Matrix-Dialog mit der letzten Auswahl öffnen",
   "matrixRunButton": "Szenariomatrix starten...",
-  "matrixLegRoundingRelaxed": "Die Abschnitte sind keine ganzen Schritte: Die Rundung konnte nicht jeden Abschnitt mindestens auf seiner Rohfahrzeit halten.",
+  "matrixLegRoundingRelaxed": "Die Fahrzeit von Anfang bis Ende ist länger als die gerundete Zeit mit Zuschlägen, damit kein Abschnitt und keine Abschnittsfolge kürzer als ihre Rohfahrzeit ist.",
   "matrixRowTotal": "Gesamt",
   "matrixStatusTrainTooLong": "Zug länger als die Strecke"
 }

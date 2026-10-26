@@ -873,6 +873,8 @@
   "matrixColRaw": "Čistá [mm:ss]",
   "matrixColScheduled": "Dle JŘ [mm:ss]",
   "matrixColDwell": "Pobyt [s]",
+  "matrixColScheduledDwell": "Pobyt dle JŘ [s]",
+  "matrixColMaxSpeed": "Max. rychlost [km/h]",
   "matrixStatusNotCertified": "není homologováno",
   "matrixStatusZeroSpeed": "žádná dovolená rychlost",
   "matrixStatusNoTrackData": "chybí data trati",
@@ -901,7 +903,7 @@
   "matrixRerun": "Spustit znovu",
   "matrixRerunTip": "Otevřít dialog matice s posledním výběrem",
   "matrixRunButton": "Spustit matici scénářů...",
-  "matrixLegRoundingRelaxed": "Úseky nejsou celé kroky: zaokrouhlení by nezachovalo u každého úseku alespoň jeho čistou jízdní dobu.",
+  "matrixLegRoundingRelaxed": "Doba O→D je delší než zaokrouhlená doba s přirážkami, aby žádný úsek ani úsek s pobyty nebyl kratší než jeho čistá jízdní doba.",
   "matrixRowTotal": "Celkem",
   "matrixStatusTrainTooLong": "vlak je delší než trať"
 }
